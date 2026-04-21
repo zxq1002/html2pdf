@@ -486,3 +486,7 @@ footer {
 .status-toast.error {
   background-color: #dc3545;
 }
+
+.status-toast.info {
+  background-color: #0078d4;
+}

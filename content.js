@@ -191,23 +191,55 @@ function cloneDocumentForExport(config) {
         padding: 20px;
       `;
 
-      const bodyClone = document.body.cloneNode(true);
-      bodyClone.querySelectorAll("script").forEach((el) => el.remove());
+      // 递归克隆并过滤不可见元素 (Task 1)
+      function safeClone(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          return node.cloneNode(true);
+        }
+        
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+          return null;
+        }
 
-      if (!config.includeImages) {
-        bodyClone.querySelectorAll("img").forEach((el) => {
-          el.style.display = "none";
-        });
-      } else {
-        // 为图片添加跨域支持 (Task 1)
-        bodyClone.querySelectorAll("img").forEach((el) => {
-          if (el.src && !el.src.startsWith("data:") && !el.src.startsWith("blob:")) {
-            el.crossOrigin = "anonymous";
+        // 过滤不需要的标签
+        const tagName = node.tagName.toUpperCase();
+        if (['SCRIPT', 'NOSCRIPT', 'STYLE', 'IFRAME', 'VIDEO', 'AUDIO'].includes(tagName)) {
+          return null;
+        }
+
+        // 过滤不可见元素
+        const style = window.getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden') {
+          return null;
+        }
+
+        const clone = node.cloneNode(false);
+        
+        // 处理图片跨域
+        if (tagName === 'IMG') {
+          if (!config.includeImages) {
+            clone.style.display = 'none';
+          } else if (node.src && !node.src.startsWith("data:") && !node.src.startsWith("blob:")) {
+            clone.crossOrigin = "anonymous";
           }
-        });
+        }
+
+        // 递归克隆子节点
+        for (const child of node.childNodes) {
+          const childClone = safeClone(child);
+          if (childClone) {
+            clone.appendChild(childClone);
+          }
+        }
+
+        return clone;
       }
 
-      container.innerHTML = bodyClone.innerHTML;
+      const bodyClone = safeClone(document.body);
+      if (bodyClone) {
+        // 将克隆的内容放入容器，而不是 bodyClone 本身（避免样式冲突）
+        container.innerHTML = bodyClone.innerHTML;
+      }
 
       resolve(container);
     } catch (error) {
@@ -291,6 +323,20 @@ async function generatePDF(element, options) {
   iframe.contentDocument.write(htmlContent);
   iframe.contentDocument.close();
 
+  // 检测高度并自动调整 scale (Task 1)
+  const contentHeight = iframe.contentDocument.body.scrollHeight;
+  let finalScale = scale || 2;
+  
+  if (contentHeight > 10000) {
+    finalScale = 1.0;
+    sendProgress(60, "检测到超长网页，已自动优化渲染性能...");
+    console.log(`[PDF Exporter] 检测到超长网页 (${contentHeight}px)，将 scale 降至 ${finalScale}`);
+  } else if (contentHeight > 5000) {
+    finalScale = 1.5;
+    sendProgress(60, "检测到长网页，已自动优化渲染性能...");
+    console.log(`[PDF Exporter] 检测到长网页 (${contentHeight}px)，将 scale 降至 ${finalScale}`);
+  }
+
   const images = iframe.contentDocument.querySelectorAll("img");
   
   // 增强图片处理逻辑 (Task 1)
@@ -365,7 +411,7 @@ async function generatePDF(element, options) {
     filename: filename,
     image: { type: "jpeg", quality: quality || 0.95 },
     html2canvas: {
-      scale: scale || 2,
+      scale: finalScale,
       useCORS: true,
       allowTaint: false,
       letterRendering: true,

@@ -398,5 +398,19 @@ document.addEventListener("DOMContentLoaded", () => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "PROGRESS_UPDATE") {
     updateProgress(request.percent, request.message);
+
+    // 如果包含优化提示，显示信息 Toast (Task 1)
+    if (request.message && request.message.includes("优化")) {
+      statusToast.textContent = request.message;
+      statusToast.className = "status-toast info";
+      statusToast.classList.remove("hidden");
+      
+      // 3秒后自动隐藏优化提示，除非已经被其他状态覆盖
+      setTimeout(() => {
+        if (statusToast.classList.contains("info")) {
+          statusToast.classList.add("hidden");
+        }
+      }, 3000);
+    }
   }
 });
