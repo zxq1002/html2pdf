@@ -32,7 +32,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["lib/Readability.js", "lib/html2pdf.bundle.min.js", "content.js"],
+      "js": ["lib/Readability.js", "src/extractor.js", "lib/html2pdf.bundle.min.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
