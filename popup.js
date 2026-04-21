@@ -8,6 +8,15 @@ const progress = document.getElementById("progress");
 const progressFill = progress.querySelector(".progress-fill");
 const progressText = progress.querySelector(".progress-text");
 const errorDiv = document.getElementById("error");
+const statusToast = document.getElementById("statusToast");
+
+// UI 状态枚举
+const STATE = {
+  IDLE: "idle",
+  PROCESSING: "processing",
+  SUCCESS: "success",
+  ERROR: "error",
+};
 
 // 默认设置
 const DEFAULT_SETTINGS = {
@@ -20,15 +29,55 @@ const DEFAULT_SETTINGS = {
 };
 
 /**
+ * 设置 UI 状态
+ * @param {string} state - 状态 (STATE 之一)
+ * @param {string} message - 可选消息
+ */
+function setUIState(state, message = "") {
+  // 默认重置
+  exportBtn.disabled = false;
+  progress.classList.add("hidden");
+  statusToast.classList.add("hidden");
+  statusToast.className = "status-toast hidden";
+
+  switch (state) {
+    case STATE.IDLE:
+      break;
+
+    case STATE.PROCESSING:
+      exportBtn.disabled = true;
+      progress.classList.remove("hidden");
+      if (message) {
+        updateProgress(10, message);
+      }
+      break;
+
+    case STATE.SUCCESS:
+      statusToast.textContent = message || "导出成功";
+      statusToast.classList.add("success");
+      statusToast.classList.remove("hidden");
+      setTimeout(() => {
+        statusToast.classList.add("hidden");
+      }, 3000);
+      break;
+
+    case STATE.ERROR:
+      statusToast.textContent = message || "发生错误";
+      statusToast.classList.add("error");
+      statusToast.classList.remove("hidden");
+      setTimeout(() => {
+        statusToast.classList.add("hidden");
+      }, 5000);
+      break;
+  }
+}
+
+/**
  * 显示错误信息
  * @param {string} message - 错误消息
  */
 function showError(message) {
-  errorDiv.textContent = message;
-  errorDiv.classList.remove("hidden");
-  setTimeout(() => {
-    errorDiv.classList.add("hidden");
-  }, 5000);
+  setUIState(STATE.ERROR, message);
 }
 
 /**
@@ -239,10 +288,7 @@ async function exportToPDF() {
     }
 
     // 更新 UI 状态
-    exportBtn.disabled = true;
-    progress.classList.remove("hidden");
-    errorDiv.classList.add("hidden");
-    updateProgress(10, "正在准备...");
+    setUIState(STATE.PROCESSING, "正在准备...");
 
     const config = getExportConfig();
 
@@ -252,7 +298,7 @@ async function exportToPDF() {
       updateProgress(50, "正在生成矢量 PDF...");
       await exportToPDFVector(tab.id, config);
 
-      updateProgress(100, "导出完成！");
+      setUIState(STATE.SUCCESS, "导出完成！");
       setTimeout(() => window.close(), 1500);
     } else {
       // 图片 PDF - 使用 html2pdf
@@ -273,7 +319,6 @@ async function exportToPDF() {
         pageUrl: tab.url,
       });
 
-
       if (!response || !response.success) {
         throw new Error(response?.error || "导出失败");
       }
@@ -287,7 +332,7 @@ async function exportToPDF() {
         saveAs: true, // 提示用户选择保存位置
       });
 
-      updateProgress(100, "导出完成！");
+      setUIState(STATE.SUCCESS, "导出完成！");
 
       // 延迟关闭弹窗
       setTimeout(() => {
@@ -297,8 +342,6 @@ async function exportToPDF() {
   } catch (error) {
     console.error("导出失败:", error);
     showError(`导出失败: ${error.message}`);
-    exportBtn.disabled = false;
-    progress.classList.add("hidden");
   }
 }
 
