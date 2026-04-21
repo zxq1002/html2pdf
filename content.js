@@ -198,6 +198,13 @@ function cloneDocumentForExport(config) {
         bodyClone.querySelectorAll("img").forEach((el) => {
           el.style.display = "none";
         });
+      } else {
+        // 为图片添加跨域支持 (Task 1)
+        bodyClone.querySelectorAll("img").forEach((el) => {
+          if (el.src && !el.src.startsWith("data:") && !el.src.startsWith("blob:")) {
+            el.crossOrigin = "anonymous";
+          }
+        });
       }
 
       container.innerHTML = bodyClone.innerHTML;
@@ -215,7 +222,7 @@ function cloneDocumentForExport(config) {
 async function generatePDF(element, options) {
   await loadLibraries();
 
-  const { pageTitle, extractedTitle, pageUrl, scale, fontSize, margin, quality } = options;
+  const { pageTitle, extractedTitle, pageUrl, scale, fontSize, margin, quality, forceLightMode } = options;
 
   // 优先使用提取的标题
   const displayTitle = extractedTitle || pageTitle || "未命名页面";
@@ -238,6 +245,7 @@ async function generatePDF(element, options) {
     border: none;
     z-index: 999999;
     background: white;
+    visibility: hidden;
   `;
   document.body.appendChild(iframe);
 
@@ -245,7 +253,7 @@ async function generatePDF(element, options) {
 
   const htmlContent = `
     <!DOCTYPE html>
-    <html>
+    <html ${forceLightMode ? 'style="color-scheme: light !important;"' : ''}>
     <head>
       <meta charset="UTF-8">
       <style>
@@ -257,7 +265,17 @@ async function generatePDF(element, options) {
           color: #333;
           background: white;
           padding: 0;
+          -webkit-print-color-adjust: exact !important;
         }
+        ${forceLightMode ? `
+          :root { color-scheme: light !important; }
+          body { background: white !important; color: #000 !important; }
+          /* 覆盖常见的深色模式变量 */
+          [data-theme='dark'], .dark, .dark-mode {
+            background-color: #fff !important;
+            color: #000 !important;
+          }
+        ` : ''}
         img { max-width: 100%; height: auto; display: block; margin: 10px auto; }
         .pdf-readable-content { padding: 0; }
         h1 { margin-top: 0; }
@@ -274,38 +292,61 @@ async function generatePDF(element, options) {
   iframe.contentDocument.close();
 
   const images = iframe.contentDocument.querySelectorAll("img");
+  
+  // 增强图片处理逻辑 (Task 1)
+  sendProgress(50, "正在处理跨域图片...");
+  
   await Promise.all(
     Array.from(images).map(
       (img) =>
-        new Promise((resolve) => {
-          if (img.complete) resolve();
-          else {
-            img.onload = resolve;
-            img.onerror = resolve;
-            setTimeout(resolve, 3000); // 增加超时到3秒
+        new Promise(async (resolve) => {
+          if (img.complete && img.naturalWidth > 0) {
+            resolve();
+            return;
+          }
+
+          const timeout = setTimeout(() => {
+            console.warn("[PDF Exporter] 图片加载超时:", img.src);
+            resolve();
+          }, 5000);
+
+          img.onload = () => {
+            clearTimeout(timeout);
+            resolve();
+          };
+          
+          img.onerror = async () => {
+            clearTimeout(timeout);
+            // 如果加载失败，尝试通过 fetch 转换为 DataURL (Task 1)
+            if (img.src && !img.src.startsWith("data:") && !img.src.startsWith("blob:")) {
+              try {
+                const response = await fetch(img.src).catch(() => null);
+                if (response && response.ok) {
+                  const blob = await response.blob();
+                  img.src = await blobToDataURL(blob);
+                  // 重新加载 DataURL 不需要很长时间
+                  img.onload = resolve;
+                  img.onerror = resolve;
+                  return;
+                }
+              } catch (e) {
+                console.warn("[PDF Exporter] 修复图片失败:", img.src);
+              }
+            }
+            resolve();
+          };
+
+          // 触发加载
+          if (img.src) {
+            const currentSrc = img.src;
+            img.src = "";
+            img.src = currentSrc;
+          } else {
+            resolve();
           }
         }),
     ),
   );
-
-  // 跨域图片处理优化
-  for (const img of images) {
-    if (img.src && !img.src.startsWith("data:") && !img.src.startsWith("blob:")) {
-      try {
-        const response = await fetch(img.src, { mode: 'no-cors' }).catch(() => null);
-        // 如果 no-cors 无法获取数据，尝试 cors
-        if (!response) {
-          const corsResponse = await fetch(img.src).catch(() => null);
-          if (corsResponse && corsResponse.ok) {
-            const blob = await corsResponse.blob();
-            img.src = await blobToDataURL(blob);
-          }
-        }
-      } catch (e) {
-        console.warn("[PDF Exporter] 跨域图片加载受限:", img.src);
-      }
-    }
-  }
 
   // 映射页边距配置 (D-05)
   let marginConfig = [15, 15, 15, 15]; // 默认 normal
