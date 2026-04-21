@@ -9,6 +9,16 @@ const progressFill = progress.querySelector(".progress-fill");
 const progressText = progress.querySelector(".progress-text");
 const errorDiv = document.getElementById("error");
 
+// 默认设置
+const DEFAULT_SETTINGS = {
+  extractContent: false,
+  exportFormat: "vector",
+  includeImages: true,
+  includeLinks: true,
+  fontSize: 16,
+  margin: 15,
+};
+
 /**
  * 显示错误信息
  * @param {string} message - 错误消息
@@ -32,6 +42,49 @@ function updateProgress(percent, text) {
 }
 
 /**
+ * 从存储加载设置并更新 UI
+ */
+async function loadSettings() {
+  try {
+    const settings = await chrome.storage.local.get(DEFAULT_SETTINGS);
+
+    document.getElementById("extractContent").checked = settings.extractContent;
+
+    const formatRadio = document.querySelector(
+      `input[name="exportFormat"][value="${settings.exportFormat}"]`,
+    );
+    if (formatRadio) formatRadio.checked = true;
+
+    document.getElementById("includeImages").checked = settings.includeImages;
+    document.getElementById("includeLinks").checked = settings.includeLinks;
+    document.getElementById("fontSize").value = settings.fontSize;
+    document.getElementById("margin").value = settings.margin;
+  } catch (error) {
+    console.error("加载设置失败:", error);
+  }
+}
+
+/**
+ * 将当前 UI 的设置保存到存储
+ */
+async function saveSettings() {
+  try {
+    const settings = {
+      extractContent: document.getElementById("extractContent").checked,
+      exportFormat: document.querySelector('input[name="exportFormat"]:checked')
+        .value,
+      includeImages: document.getElementById("includeImages").checked,
+      includeLinks: document.getElementById("includeLinks").checked,
+      fontSize: parseInt(document.getElementById("fontSize").value, 10),
+      margin: parseInt(document.getElementById("margin").value, 10),
+    };
+    await chrome.storage.local.set(settings);
+  } catch (error) {
+    console.error("保存设置失败:", error);
+  }
+}
+
+/**
  * 获取用户选择的配置
  * @returns {Object} 配置对象
  */
@@ -42,12 +95,16 @@ function getExportConfig() {
   ).value;
   const includeImages = document.getElementById("includeImages").checked;
   const includeLinks = document.getElementById("includeLinks").checked;
+  const fontSize = parseInt(document.getElementById("fontSize").value, 10);
+  const margin = parseInt(document.getElementById("margin").value, 10);
 
   return {
     mode: isReadable ? "readable" : "original",
     format, // 'vector' 或 'image'
     includeImages,
     includeLinks,
+    fontSize,
+    margin,
     quality: 2,
     scale: 2,
   };
@@ -209,7 +266,7 @@ async function exportToPDF() {
       const action =
         config.mode === "readable" ? "EXTRACT_CONTENT" : "exportPDF";
 
-      const response = await chrome.tabs.sendMessage(tabId, {
+      const response = await chrome.tabs.sendMessage(tab.id, {
         action: action,
         config: config,
         pageTitle: tab.title,
@@ -247,7 +304,16 @@ async function exportToPDF() {
 
 // 事件监听
 document.addEventListener("DOMContentLoaded", () => {
+  // 加载已保存的设置
+  loadSettings();
+
   exportBtn.addEventListener("click", exportToPDF);
+
+  // 监听所有输入的变化并自动保存
+  const inputs = document.querySelectorAll("input, select");
+  inputs.forEach((input) => {
+    input.addEventListener("change", saveSettings);
+  });
 
   // 添加键盘快捷键支持
   document.addEventListener("keydown", (e) => {
