@@ -16,6 +16,16 @@ if (window.__pdfExporterInjected) {
       handleExportPDF(request, sendResponse);
       return true;
     }
+    if (request.action === "EXTRACT_CONTENT") {
+      extractReadableContent()
+        .then((contentElement) => {
+          sendResponse({ success: true, html: contentElement.innerHTML });
+        })
+        .catch((err) => {
+          sendResponse({ success: false, error: err.message });
+        });
+      return true;
+    }
     if (request.action === "ping") {
       sendResponse({ success: true });
       return false;
@@ -70,90 +80,77 @@ async function handleExportPDF(request, sendResponse) {
 /**
  * 提取可阅读内容
  */
-function extractReadableContent() {
-  return new Promise((resolve, reject) => {
-    try {
-      let article = document.querySelector("article");
-      let main = document.querySelector("main");
-      let content = document.querySelector('[role="main"]');
-
-      let targetElement = article || main || content || document.body;
-      const clone = targetElement.cloneNode(true);
-
-      const selectorsToRemove = [
-        "script",
-        "style",
-        "noscript",
-        "iframe",
-        "nav",
-        "header",
-        "footer",
-        "aside",
-        ".advertisement",
-        ".ad",
-        ".ads",
-        ".social-share",
-        ".comments",
-        '[role="navigation"]',
-        '[role="banner"]',
-        '[role="complementary"]',
-      ];
-
-      selectorsToRemove.forEach((selector) => {
-        clone.querySelectorAll(selector).forEach((el) => el.remove());
-      });
-
-      // 移除 VWO 相关元素
-      clone
-        .querySelectorAll('[id*="_vis_opt"], [class*="_vis_opt"]')
-        .forEach((el) => el.remove());
-
-      // 强制所有元素可见
-      clone.querySelectorAll("*").forEach((el) => {
-        el.style.opacity = "1";
-        el.style.visibility = "visible";
-      });
-
-      const container = document.createElement("div");
-      container.className = "pdf-readable-content";
-      container.style.cssText = `
-        max-width: 800px;
-        margin: 0 auto;
-        padding: 40px;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        line-height: 1.8;
-        color: #333;
-        background: #fff;
-      `;
-
-      const title = document.createElement("h1");
-      title.textContent = document.title;
-      title.style.cssText = `
-        font-size: 28px;
-        font-weight: 600;
-        margin-bottom: 8px;
-        color: #1a1a1a;
-      `;
-      container.appendChild(title);
-
-      const source = document.createElement("p");
-      source.innerHTML = `<a href="${window.location.href}" style="color: #0078d4; text-decoration: none;">${window.location.hostname}</a>`;
-      source.style.cssText = `
-        font-size: 13px;
-        color: #666;
-        margin-bottom: 30px;
-        padding-bottom: 20px;
-        border-bottom: 1px solid #e0e0e0;
-      `;
-      container.appendChild(source);
-
-      container.appendChild(clone);
-
-      resolve(container);
-    } catch (error) {
-      reject(error);
+async function extractReadableContent() {
+  try {
+    // 使用 src/extractor.js 提供的 extract 函数（基于 Readability.js）
+    if (typeof extract !== "function") {
+      throw new Error("提取模块未正确加载");
     }
-  });
+
+    const article = extract(document);
+
+    const container = document.createElement("div");
+    container.className = "pdf-readable-content";
+    container.style.cssText = `
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 40px;
+      font-family: "Charter", "Georgia", "Source Serif Pro", serif;
+      line-height: 1.8;
+      color: #333;
+      background: #fff;
+    `;
+
+    const title = document.createElement("h1");
+    title.textContent = article.title || document.title;
+    title.style.cssText = `
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      color: #1a1a1a;
+      line-height: 1.3;
+    `;
+    container.appendChild(title);
+
+    if (article.byline) {
+      const author = document.createElement("p");
+      author.textContent = article.byline;
+      author.style.cssText = `
+        font-size: 16px;
+        color: #555;
+        margin-bottom: 8px;
+        font-weight: 500;
+      `;
+      container.appendChild(author);
+    }
+
+    const source = document.createElement("p");
+    source.innerHTML = `<a href="${window.location.href}" style="color: #666; text-decoration: none; border-bottom: 1px solid #ccc;">${window.location.hostname}</a>`;
+    source.style.cssText = `
+      font-size: 13px;
+      color: #999;
+      margin-bottom: 30px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #eee;
+    `;
+    container.appendChild(source);
+
+    const content = document.createElement("div");
+    content.innerHTML = article.content;
+    
+    // 清理内容样式
+    content.querySelectorAll("*").forEach(el => {
+      el.style.maxWidth = "100%";
+      el.style.height = "auto";
+    });
+
+    container.appendChild(content);
+
+    return container;
+  } catch (error) {
+    console.error("[PDF Exporter] 提取失败:", error);
+    throw error;
+  }
 }
 
 /**
@@ -218,7 +215,7 @@ async function generatePDF(element, options) {
   `;
   document.body.appendChild(iframe);
 
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 50));
 
   const htmlContent = `
     <!DOCTYPE html>
@@ -228,14 +225,16 @@ async function generatePDF(element, options) {
       <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-          font-size: 14px;
+          font-family: "Charter", "Georgia", "Source Serif Pro", serif;
+          font-size: 16px;
           line-height: 1.6;
           color: #333;
           background: white;
-          padding: 20px;
+          padding: 0;
         }
-        img { max-width: 100%; height: auto; }
+        img { max-width: 100%; height: auto; display: block; margin: 10px auto; }
+        .pdf-readable-content { padding: 0; }
+        h1 { margin-top: 0; }
       </style>
     </head>
     <body>
@@ -257,66 +256,47 @@ async function generatePDF(element, options) {
           else {
             img.onload = resolve;
             img.onerror = resolve;
-            setTimeout(resolve, 2000);
+            setTimeout(resolve, 3000); // 增加超时到3秒
           }
         }),
     ),
   );
 
-  await new Promise((r) => setTimeout(r, 500));
-
+  // 跨域图片处理优化
   for (const img of images) {
-    try {
-      if (img.src && !img.src.startsWith("data:")) {
-        const imgUrl = new URL(img.src, iframe.contentDocument.baseURI);
-        const isCrossOrigin =
-          imgUrl.origin !== iframe.contentWindow.location.origin;
-
-        if (isCrossOrigin) {
-          try {
-            const response = await fetch(img.src, {
-              mode: "cors",
-              credentials: "omit",
-            }).catch(() => null);
-
-            if (response && response.ok) {
-              const blob = await response.blob();
-              const reader = new FileReader();
-              const dataUrl = await new Promise((resolve) => {
-                reader.onloadend = () => resolve(reader.result);
-                reader.readAsDataURL(blob);
-              });
-              img.src = dataUrl;
-              continue;
-            }
-          } catch (e) {
-            // 忽略
+    if (img.src && !img.src.startsWith("data:") && !img.src.startsWith("blob:")) {
+      try {
+        const response = await fetch(img.src, { mode: 'no-cors' }).catch(() => null);
+        // 如果 no-cors 无法获取数据，尝试 cors
+        if (!response) {
+          const corsResponse = await fetch(img.src).catch(() => null);
+          if (corsResponse && corsResponse.ok) {
+            const blob = await corsResponse.blob();
+            img.src = await blobToDataURL(blob);
           }
         }
+      } catch (e) {
+        console.warn("[PDF Exporter] 跨域图片加载受限:", img.src);
       }
-    } catch (e) {
-      // 忽略
     }
   }
 
-  await new Promise((r) => setTimeout(r, 500));
-
   const opt = {
-    margin: [10, 10, 10, 10],
+    margin: [15, 15, 15, 15],
     filename: filename,
-    image: { type: "jpeg", quality: 0.9 },
+    image: { type: "jpeg", quality: 0.98 },
     html2canvas: {
-      scale: scale || 1.5,
+      scale: scale || 2,
       useCORS: true,
-      allowTaint: true,
-      foreignObjectRendering: false,
-      logging: false,
+      allowTaint: false,
+      letterRendering: true,
       backgroundColor: "#ffffff",
     },
     jsPDF: {
       unit: "mm",
       format: "a4",
       orientation: "portrait",
+      compress: true
     },
   };
 
@@ -328,14 +308,9 @@ async function generatePDF(element, options) {
       .from(iframe.contentDocument.body)
       .output("blob");
 
-    console.log("[PDF Exporter] PDF 大小:", pdfBlob.size);
+    console.log("[PDF Exporter] PDF 大小:", (pdfBlob.size / 1024).toFixed(2), "KB");
 
-    const dataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(pdfBlob);
-    });
+    const dataUrl = await blobToDataURL(pdfBlob);
 
     iframe.remove();
 
@@ -346,7 +321,7 @@ async function generatePDF(element, options) {
     };
   } catch (error) {
     console.error("[PDF Exporter] 错误:", error);
-    iframe.remove();
+    if (iframe.parentNode) iframe.remove();
     throw error;
   }
 }
