@@ -29,13 +29,13 @@
 
 | 需求 ID | 阶段 | 状态 |
 |---------|------|------|
-| FEAT-01 | Phase 1 | Pending |
-| FEAT-02 | Phase 1 | Pending |
-| FEAT-03 | Phase 1 | Pending |
-| FEAT-04 | Phase 2 | Pending |
-| FEAT-05 | Phase 2 | Pending |
-| FEAT-06 | Phase 1 | Pending |
-| FEAT-07 | Phase 3 | Pending |
-| NFR-01  | Phase 1 | Pending |
+| FEAT-01 | Phase 1 | Completed |
+| FEAT-02 | Phase 1 | Completed |
+| FEAT-03 | Phase 1 | Completed |
+| FEAT-04 | Phase 2 | In Progress |
+| FEAT-05 | Phase 2 | In Progress |
+| FEAT-06 | Phase 1 | Completed |
+| FEAT-07 | Phase 2 | In Progress |
+| NFR-01  | Phase 1 | Completed |
 | NFR-02  | Phase 4 | Pending |
 | NFR-03  | Phase 4 | Pending |
