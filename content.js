@@ -102,12 +102,15 @@ async function handleExportPDF(request, sendResponse) {
  */
 async function extractReadableContent() {
   try {
-    // 使用 src/extractor.js 提供的 extract 函数（基于 Readability.js）
-    if (typeof extract !== "function") {
-      throw new Error("提取模块未正确加载");
+    // 检查提取函数是否存在（支持全局变量或显式挂载到 window）
+    const extractFn = typeof extract === "function" ? extract : window.extract;
+    
+    if (typeof extractFn !== "function") {
+      console.error("[PDF Exporter] Extractor function not found in global scope or window.extract");
+      throw new Error("提取模块未正确加载，请尝试刷新页面");
     }
 
-    const article = extract(document);
+    const article = extractFn(document);
 
     const container = document.createElement("div");
     container.className = "pdf-readable-content";

@@ -16,8 +16,10 @@ if (typeof require !== 'undefined') {
 }
 
 // In browser, Readability will be available globally if loaded via script tag
-if (typeof window !== 'undefined' && window.Readability) {
-  Readability = window.Readability;
+if (typeof window !== 'undefined') {
+  if (window.Readability) {
+    Readability = window.Readability;
+  }
 } else if (typeof global !== 'undefined' && global.Readability) {
   Readability = global.Readability;
 }
@@ -39,30 +41,45 @@ function extract(doc) {
     console.error('Readability library not found');
     return {
       title: doc.title,
-      content: doc.body.innerHTML,
+      content: doc.body ? doc.body.innerHTML : '',
       excerpt: '',
       byline: ''
     };
   }
 
-  const reader = new R(doc);
-  const article = reader.parse();
+  try {
+    const reader = new R(doc);
+    const article = reader.parse();
 
-  if (!article) {
+    if (!article) {
+      return {
+        title: doc.title,
+        content: doc.body ? doc.body.innerHTML : '',
+        excerpt: '',
+        byline: ''
+      };
+    }
+
+    return {
+      title: article.title,
+      content: article.content,
+      excerpt: article.excerpt,
+      byline: article.byline
+    };
+  } catch (e) {
+    console.error('Error during extraction:', e);
     return {
       title: doc.title,
-      content: doc.body.innerHTML,
+      content: doc.body ? doc.body.innerHTML : '',
       excerpt: '',
       byline: ''
     };
   }
+}
 
-  return {
-    title: article.title,
-    content: article.content,
-    excerpt: article.excerpt,
-    byline: article.byline
-  };
+// Explicitly expose to window for content script usage
+if (typeof window !== 'undefined') {
+  window.extract = extract;
 }
 
 if (typeof module !== 'undefined') {
