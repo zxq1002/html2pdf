@@ -41,9 +41,12 @@ async function handleExportPDF(request, sendResponse) {
     });
 
     let contentElement;
+    let extractedTitle = pageTitle;
 
     if (config.mode === "readable") {
-      contentElement = await extractReadableContent();
+      const result = await extractReadableContent();
+      contentElement = result.element;
+      extractedTitle = result.extractedTitle;
     } else {
       contentElement = await cloneDocumentForExport(config);
     }
@@ -53,6 +56,7 @@ async function handleExportPDF(request, sendResponse) {
     const pdfResult = await generatePDF(contentElement, {
       ...config,
       pageTitle,
+      extractedTitle,
       pageUrl,
     });
 
@@ -141,7 +145,10 @@ async function extractReadableContent() {
 
     container.appendChild(content);
 
-    return container;
+    return {
+      element: container,
+      extractedTitle: article.title || document.title
+    };
   } catch (error) {
     console.error("[PDF Exporter] 提取失败:", error);
     throw error;
@@ -187,13 +194,16 @@ function cloneDocumentForExport(config) {
 async function generatePDF(element, options) {
   await loadLibraries();
 
-  const { pageTitle, pageUrl, scale } = options;
+  const { pageTitle, extractedTitle, pageUrl, scale, fontSize, margin } = options;
 
+  // 优先使用提取的标题
+  const displayTitle = extractedTitle || pageTitle || "未命名页面";
+  
   const safeTitle =
-    pageTitle
+    displayTitle
       .replace(/[<>:"/\\|?*]/g, "_")
       .replace(/\s+/g, " ")
-      .trim() || "未命名页面";
+      .trim();
 
   const filename = `${safeTitle}.pdf`;
 
@@ -221,7 +231,7 @@ async function generatePDF(element, options) {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
           font-family: "Charter", "Georgia", "Source Serif Pro", serif;
-          font-size: 16px;
+          font-size: ${typeof fontSize === 'number' ? fontSize + 'px' : (fontSize || '16px')};
           line-height: 1.6;
           color: #333;
           background: white;
@@ -276,8 +286,20 @@ async function generatePDF(element, options) {
     }
   }
 
+  // 映射页边距配置 (D-05)
+  let marginConfig = [15, 15, 15, 15]; // 默认 normal
+  if (margin === 'narrow' || margin === 5) {
+    marginConfig = [5, 5, 5, 5];
+  } else if (margin === 'wide' || margin === 25 || margin === 30) {
+    marginConfig = [30, 30, 30, 30];
+  } else if (typeof margin === 'number') {
+    marginConfig = [margin, margin, margin, margin];
+  } else if (Array.isArray(margin)) {
+    marginConfig = margin;
+  }
+
   const opt = {
-    margin: [15, 15, 15, 15],
+    margin: marginConfig,
     filename: filename,
     image: { type: "jpeg", quality: 0.98 },
     html2canvas: {
