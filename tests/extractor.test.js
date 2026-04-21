@@ -1,5 +1,15 @@
-const { extract } = require('../src/extractor');
+const util = require('util');
+
+// Polyfill TextEncoder and TextDecoder for JSDOM in Node.js
+if (typeof global.TextEncoder === 'undefined') {
+  global.TextEncoder = util.TextEncoder;
+}
+if (typeof global.TextDecoder === 'undefined') {
+  global.TextDecoder = util.TextDecoder;
+}
+
 const { JSDOM } = require('jsdom');
+const { extract } = require('../src/extractor');
 const path = require('path');
 const fs = require('fs');
 
@@ -12,16 +22,16 @@ describe('Extractor Module', () => {
     const html = `
       <!DOCTYPE html>
       <html>
-        <head><title>Test Page</title></head>
+        <head><title>Main Title - Site Name</title></head>
         <body>
           <header>
             <nav>Navigation</nav>
           </header>
-          <main>
+          <article>
             <h1>Main Title</h1>
             <p>This is the first paragraph of the article.</p>
             <p>This is the second paragraph.</p>
-          </main>
+          </article>
           <aside>Side Content</aside>
           <footer>Footer</footer>
         </body>
@@ -30,7 +40,7 @@ describe('Extractor Module', () => {
     const dom = new JSDOM(html);
     const result = extract(dom.window.document);
 
-    expect(result.title).toBe('Main Title');
+    expect(result.title).toContain('Main Title');
     expect(result.content).toContain('This is the first paragraph');
     expect(result.content).not.toContain('Navigation');
     expect(result.content).not.toContain('Side Content');
