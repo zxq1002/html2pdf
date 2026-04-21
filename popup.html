@@ -15,23 +15,14 @@
 
     <main>
       <section class="mode-section">
-        <label class="section-label">导出模式</label>
-        <div class="mode-options">
-          <label class="radio-option">
-            <input type="radio" name="exportMode" value="original" checked>
-            <span class="radio-custom"></span>
-            <span class="radio-label">
-              <strong>原始样式</strong>
-              <small>保留网页原始布局和样式</small>
-            </span>
-          </label>
-          <label class="radio-option">
-            <input type="radio" name="exportMode" value="readable">
-            <span class="radio-custom"></span>
-            <span class="radio-label">
-              <strong>阅读模式</strong>
-              <small>优化排版，移除广告和导航</small>
-            </span>
+        <div class="switch-option">
+          <span class="radio-label">
+            <strong>提取正文 (阅读模式)</strong>
+            <small>使用 Readability 优化排版，移除干扰内容</small>
+          </span>
+          <label class="switch">
+            <input type="checkbox" id="extractContent">
+            <span class="slider round"></span>
           </label>
         </div>
       </section>

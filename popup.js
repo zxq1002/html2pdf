@@ -36,7 +36,7 @@ function updateProgress(percent, text) {
  * @returns {Object} 配置对象
  */
 function getExportConfig() {
-  const mode = document.querySelector('input[name="exportMode"]:checked').value;
+  const isReadable = document.getElementById("extractContent").checked;
   const format = document.querySelector(
     'input[name="exportFormat"]:checked',
   ).value;
@@ -44,7 +44,7 @@ function getExportConfig() {
   const includeLinks = document.getElementById("includeLinks").checked;
 
   return {
-    mode,
+    mode: isReadable ? "readable" : "original",
     format, // 'vector' 或 'image'
     includeImages,
     includeLinks,
@@ -65,7 +65,12 @@ async function ensureContentScriptInjected(tabId) {
     console.log("[PDF Exporter] 注入 content script...");
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["lib/html2pdf.bundle.min.js", "content.js"],
+      files: [
+        "lib/Readability.js",
+        "src/extractor.js",
+        "lib/html2pdf.bundle.min.js",
+        "content.js",
+      ],
     });
     // 等待脚本初始化
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -201,12 +206,16 @@ async function exportToPDF() {
       // 向 content script 发送消息执行导出
       updateProgress(40, "正在捕获页面内容...");
 
-      const response = await chrome.tabs.sendMessage(tab.id, {
-        action: "exportPDF",
+      const action =
+        config.mode === "readable" ? "EXTRACT_CONTENT" : "exportPDF";
+
+      const response = await chrome.tabs.sendMessage(tabId, {
+        action: action,
         config: config,
         pageTitle: tab.title,
         pageUrl: tab.url,
       });
+
 
       if (!response || !response.success) {
         throw new Error(response?.error || "导出失败");

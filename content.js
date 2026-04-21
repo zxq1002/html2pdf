@@ -17,13 +17,8 @@ if (window.__pdfExporterInjected) {
       return true;
     }
     if (request.action === "EXTRACT_CONTENT") {
-      extractReadableContent()
-        .then((contentElement) => {
-          sendResponse({ success: true, html: contentElement.innerHTML });
-        })
-        .catch((err) => {
-          sendResponse({ success: false, error: err.message });
-        });
+      // 执行提取并导出
+      handleExportPDF({ ...request, config: { ...request.config, mode: 'readable' } }, sendResponse);
       return true;
     }
     if (request.action === "ping") {
