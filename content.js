@@ -29,6 +29,23 @@ if (window.__pdfExporterInjected) {
 }
 
 /**
+ * 向 Popup 发送进度更新
+ */
+function sendProgress(percent, message) {
+  try {
+    chrome.runtime.sendMessage({
+      action: "PROGRESS_UPDATE",
+      percent,
+      message
+    }).catch(() => {
+      // 如果 Popup 已关闭，sendMessage 会报错，忽略即可
+    });
+  } catch (e) {
+    // 忽略
+  }
+}
+
+/**
  * 处理 PDF 导出请求
  */
 async function handleExportPDF(request, sendResponse) {
@@ -40,6 +57,8 @@ async function handleExportPDF(request, sendResponse) {
       url: pageUrl,
     });
 
+    sendProgress(10, "正在准备内容...");
+
     let contentElement;
     let extractedTitle = pageTitle;
 
@@ -50,6 +69,8 @@ async function handleExportPDF(request, sendResponse) {
     } else {
       contentElement = await cloneDocumentForExport(config);
     }
+
+    sendProgress(30, "内容准备完成，开始渲染...");
 
     console.log("[PDF Exporter] 内容准备完成，开始生成 PDF");
 
@@ -194,7 +215,7 @@ function cloneDocumentForExport(config) {
 async function generatePDF(element, options) {
   await loadLibraries();
 
-  const { pageTitle, extractedTitle, pageUrl, scale, fontSize, margin } = options;
+  const { pageTitle, extractedTitle, pageUrl, scale, fontSize, margin, quality } = options;
 
   // 优先使用提取的标题
   const displayTitle = extractedTitle || pageTitle || "未命名页面";
@@ -301,7 +322,7 @@ async function generatePDF(element, options) {
   const opt = {
     margin: marginConfig,
     filename: filename,
-    image: { type: "jpeg", quality: 0.98 },
+    image: { type: "jpeg", quality: quality || 0.95 },
     html2canvas: {
       scale: scale || 2,
       useCORS: true,
@@ -319,17 +340,22 @@ async function generatePDF(element, options) {
 
   try {
     console.log("[PDF Exporter] 生成 PDF...");
+    sendProgress(70, "正在生成 PDF 页面...");
 
     const pdfBlob = await html2pdf()
       .set(opt)
       .from(iframe.contentDocument.body)
       .output("blob");
 
+    sendProgress(90, "正在处理文件...");
+
     console.log("[PDF Exporter] PDF 大小:", (pdfBlob.size / 1024).toFixed(2), "KB");
 
     const dataUrl = await blobToDataURL(pdfBlob);
 
     iframe.remove();
+
+    sendProgress(100, "生成完成！");
 
     return {
       filename,
