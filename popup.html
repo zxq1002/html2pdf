@@ -50,6 +50,27 @@
       </section>
 
       <section class="options-section">
+        <label class="section-label">页面样式</label>
+        <div class="style-controls">
+          <div class="control-group">
+            <label for="fontSize">字体大小</label>
+            <div class="input-wrapper">
+              <input type="number" id="fontSize" min="12" max="24" step="1" value="16">
+              <span class="unit">px</span>
+            </div>
+          </div>
+          <div class="control-group">
+            <label for="margin">页边距</label>
+            <select id="margin">
+              <option value="5">窄 (5mm)</option>
+              <option value="15" selected>标准 (15mm)</option>
+              <option value="25">宽 (25mm)</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="options-section">
         <label class="section-label">选项</label>
         <label class="checkbox-option">
           <input type="checkbox" id="includeImages" checked>
