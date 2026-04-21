@@ -317,6 +317,45 @@ input:checked + .slider:before {
   padding-right: 32px !important;
 }
 
+/* Range slider styling */
+.slider-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+input[type="range"] {
+  flex: 1;
+  -webkit-appearance: none;
+  height: 6px;
+  background: #e0e0e0;
+  border-radius: 3px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  background: #0078d4;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 0 4px rgba(0, 120, 212, 0.1);
+}
+
+#qualityValue {
+  font-size: 13px;
+  color: #0078d4;
+  font-weight: 600;
+  min-width: 24px;
+}
+
 /* Footer */
 footer {
   padding: 0 20px 20px;

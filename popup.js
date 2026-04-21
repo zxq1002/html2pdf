@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS = {
   includeLinks: true,
   fontSize: 16,
   margin: 15,
+  quality: 0.9,
 };
 
 /**
@@ -108,6 +109,13 @@ async function loadSettings() {
     document.getElementById("includeLinks").checked = settings.includeLinks;
     document.getElementById("fontSize").value = settings.fontSize;
     document.getElementById("margin").value = settings.margin;
+
+    const qualitySlider = document.getElementById("imageQuality");
+    if (qualitySlider) {
+      qualitySlider.value = settings.quality;
+      const qualityDisplay = document.getElementById("qualityValue");
+      if (qualityDisplay) qualityDisplay.textContent = settings.quality;
+    }
   } catch (error) {
     console.error("加载设置失败:", error);
   }
@@ -126,6 +134,7 @@ async function saveSettings() {
       includeLinks: document.getElementById("includeLinks").checked,
       fontSize: parseInt(document.getElementById("fontSize").value, 10),
       margin: parseInt(document.getElementById("margin").value, 10),
+      quality: parseFloat(document.getElementById("imageQuality").value),
     };
     await chrome.storage.local.set(settings);
   } catch (error) {
@@ -146,6 +155,7 @@ function getExportConfig() {
   const includeLinks = document.getElementById("includeLinks").checked;
   const fontSize = parseInt(document.getElementById("fontSize").value, 10);
   const margin = parseInt(document.getElementById("margin").value, 10);
+  const quality = parseFloat(document.getElementById("imageQuality").value);
 
   return {
     mode: isReadable ? "readable" : "original",
@@ -154,7 +164,7 @@ function getExportConfig() {
     includeLinks,
     fontSize,
     margin,
-    quality: 2,
+    quality: quality,
     scale: 2,
   };
 }
@@ -350,6 +360,14 @@ document.addEventListener("DOMContentLoaded", () => {
   // 加载已保存的设置
   loadSettings();
 
+  const imageQuality = document.getElementById("imageQuality");
+  const qualityValue = document.getElementById("qualityValue");
+  if (imageQuality && qualityValue) {
+    imageQuality.addEventListener("input", () => {
+      qualityValue.textContent = imageQuality.value;
+    });
+  }
+
   exportBtn.addEventListener("click", exportToPDF);
 
   // 监听所有输入的变化并自动保存
@@ -364,4 +382,11 @@ document.addEventListener("DOMContentLoaded", () => {
       exportToPDF();
     }
   });
+});
+
+// 监听来自 Content Script 的进度消息
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "PROGRESS_UPDATE") {
+    updateProgress(request.percent, request.message);
+  }
 });
