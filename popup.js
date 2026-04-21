@@ -24,6 +24,7 @@ const DEFAULT_SETTINGS = {
   exportFormat: "vector",
   includeImages: true,
   includeLinks: true,
+  forceLightMode: true,
   fontSize: 16,
   margin: 15,
   quality: 0.9,
@@ -107,6 +108,7 @@ async function loadSettings() {
 
     document.getElementById("includeImages").checked = settings.includeImages;
     document.getElementById("includeLinks").checked = settings.includeLinks;
+    document.getElementById("forceLightMode").checked = settings.forceLightMode;
     document.getElementById("fontSize").value = settings.fontSize;
     document.getElementById("margin").value = settings.margin;
 
@@ -132,6 +134,7 @@ async function saveSettings() {
         .value,
       includeImages: document.getElementById("includeImages").checked,
       includeLinks: document.getElementById("includeLinks").checked,
+      forceLightMode: document.getElementById("forceLightMode").checked,
       fontSize: parseInt(document.getElementById("fontSize").value, 10),
       margin: parseInt(document.getElementById("margin").value, 10),
       quality: parseFloat(document.getElementById("imageQuality").value),
@@ -153,6 +156,7 @@ function getExportConfig() {
   ).value;
   const includeImages = document.getElementById("includeImages").checked;
   const includeLinks = document.getElementById("includeLinks").checked;
+  const forceLightMode = document.getElementById("forceLightMode").checked;
   const fontSize = parseInt(document.getElementById("fontSize").value, 10);
   const margin = parseInt(document.getElementById("margin").value, 10);
   const quality = parseFloat(document.getElementById("imageQuality").value);
@@ -162,6 +166,7 @@ function getExportConfig() {
     format, // 'vector' 或 'image'
     includeImages,
     includeLinks,
+    forceLightMode,
     fontSize,
     margin,
     quality: quality,
@@ -202,7 +207,7 @@ async function exportToPDFVector(tabId, config) {
 
   await chrome.scripting.executeScript({
     target: { tabId },
-    func: (includeImages) => {
+    func: (includeImages, forceLightMode) => {
       // 准备打印样式
       const printStyles = document.createElement("style");
       printStyles.textContent = `
@@ -212,6 +217,10 @@ async function exportToPDFVector(tabId, config) {
             size: auto;
             margin: 10mm;
           }
+
+          ${forceLightMode ? `
+          :root { color-scheme: light !important; }
+          ` : ''}
 
           * {
             -webkit-print-color-adjust: exact !important;
@@ -223,6 +232,7 @@ async function exportToPDFVector(tabId, config) {
             height: auto !important;
             overflow: visible !important;
             background: white !important;
+            ${forceLightMode ? 'color: black !important;' : ''}
           }
 
           body {
@@ -267,7 +277,7 @@ async function exportToPDFVector(tabId, config) {
         setTimeout(() => printStyles.remove(), 1000);
       }, 500);
     },
-    args: [config.includeImages],
+    args: [config.includeImages, config.forceLightMode],
   });
 }
 
