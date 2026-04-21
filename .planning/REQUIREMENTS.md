@@ -32,10 +32,10 @@
 | FEAT-01 | Phase 1 | Completed |
 | FEAT-02 | Phase 1 | Completed |
 | FEAT-03 | Phase 1 | Completed |
-| FEAT-04 | Phase 2 | In Progress |
-| FEAT-05 | Phase 2 | In Progress |
+| FEAT-04 | Phase 2 | Completed |
+| FEAT-05 | Phase 2 | Completed |
 | FEAT-06 | Phase 1 | Completed |
-| FEAT-07 | Phase 2 | In Progress |
+| FEAT-07 | Phase 3 | Completed |
 | NFR-01  | Phase 1 | Completed |
 | NFR-02  | Phase 4 | Pending |
 | NFR-03  | Phase 4 | Pending |
