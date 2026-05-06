@@ -1,43 +1,117 @@
 /**
  * 网页导出 PDF 插件 - 内容脚本
  * 负责在网页上下文中执行 PDF 生成
+ *
+ * 重要：使用 var 而非 const/let，因为 chrome.scripting.executeScript
+ * 二次注入时 const 会抛 SyntaxError 导致整个脚本静默失败
  */
 
-// 防止重复注入
-if (window.__pdfExporterInjected) {
-  console.log("[PDF Exporter] 已经注入，跳过");
-} else {
-  window.__pdfExporterInjected = true;
-  console.log("[PDF Exporter] 内容脚本已注入");
-
-  // 监听来自 popup 的消息
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "exportPDF") {
-      handleExportPDF(request, sendResponse);
-      return true;
-    }
-    if (request.action === "EXTRACT_CONTENT") {
-      // 执行提取并导出
-      handleExportPDF({ ...request, config: { ...request.config, mode: 'readable' } }, sendResponse);
-      return true;
-    }
-    if (request.action === "ping") {
-      sendResponse({ success: true });
-      return false;
-    }
-  });
+// 检查扩展上下文是否仍然有效
+function isExtensionContextValid() {
+  try {
+    return !!(chrome && chrome.runtime && chrome.runtime.id);
+  } catch (e) {
+    return false;
+  }
 }
+
+// 内容脚本版本号 —— 每次修改 content.js 后必须更新！
+var CONTENT_SCRIPT_VERSION = '2024-04-24-v4';
+
+// 清理旧版本：移除旧的事件监听器和全局状态
+if (typeof window.__pdfExporterCleanup === 'function') {
+  console.log('[PDF Exporter] 清理旧版本...');
+  try {
+    window.__pdfExporterCleanup();
+  } catch(e) {
+    console.warn('[PDF Exporter] 清理旧版本出错:', e);
+  }
+}
+
+// 如果已注入相同或更新版本，跳过
+if (window.__pdfExporterInjected === CONTENT_SCRIPT_VERSION) {
+  console.log('[PDF Exporter] 相同版本已注入，跳过:', CONTENT_SCRIPT_VERSION);
+} else {
+
+// 安全的 sendResponse 包装器，防止通道关闭导致异常传播
+function safeSendResponse(sendResponse, data) {
+  try {
+    sendResponse(data);
+  } catch (e) {
+    console.warn('[PDF Exporter] sendResponse 失败（通道可能已关闭）:', e.message);
+  }
+}
+
+// 定义消息监听器（命名函数，便于移除）
+function pdfExporterMessageListener(request, sender, sendResponse) {
+  // 检查扩展上下文是否有效——如果无效则移除自身并忽略消息
+  if (!isExtensionContextValid()) {
+    console.warn('[PDF Exporter] 扩展上下文已失效，移除监听器');
+    chrome.runtime.onMessage.removeListener(pdfExporterMessageListener);
+    return false; // 不处理，让 popup 端超时后重新注入
+  }
+
+  // 只处理主框架的消息，忽略 iframe（避免广告/评论 iframe 干扰消息通道）
+  if (window.self !== window.top) {
+    return false;
+  }
+
+  if (request.action === "exportPDF") {
+    handleExportPDF(request, sendResponse).catch(function(err) {
+      console.error('[PDF Exporter] 未捕获的导出错误:', err);
+      safeSendResponse(sendResponse, { success: false, error: String(err && err.message) || String(err) || '未知错误' });
+    });
+    return true;
+  }
+  if (request.action === "EXTRACT_CONTENT") {
+    handleExportPDF({ config: { mode: 'readable' }, pageTitle: request.pageTitle, pageUrl: request.pageUrl }, sendResponse).catch(function(err) {
+      console.error('[PDF Exporter] 未捕获的提取错误:', err);
+      safeSendResponse(sendResponse, { success: false, error: String(err && err.message) || String(err) || '未知错误' });
+    });
+    return true;
+  }
+  if (request.action === "GET_READABLE_HTML") {
+    handleGetReadableHTML(request, sendResponse).catch(function(err) {
+      console.error('[PDF Exporter] 未捕获的 HTML 提取错误:', err);
+      safeSendResponse(sendResponse, { success: false, error: String(err && err.message) || String(err) || '未知错误' });
+    });
+    return true;
+  }
+  if (request.action === "ping") {
+    // ping 响应中包含上下文有效性信息，让 popup 判断是否需要重新注入
+    safeSendResponse(sendResponse, {
+      success: true,
+      version: CONTENT_SCRIPT_VERSION,
+      contextValid: isExtensionContextValid()
+    });
+    return false;
+  }
+}
+
+// 注册监听器
+chrome.runtime.onMessage.addListener(pdfExporterMessageListener);
+
+// 保存清理函数和版本号
+window.__pdfExporterCleanup = function() {
+  chrome.runtime.onMessage.removeListener(pdfExporterMessageListener);
+  delete window.__pdfExporterInjected;
+  delete window.__extractorInjected;
+  if (typeof window.extract !== 'undefined') delete window.extract;
+};
+window.__pdfExporterInjected = CONTENT_SCRIPT_VERSION;
+console.log('[PDF Exporter] 内容脚本已注入 v' + CONTENT_SCRIPT_VERSION);
 
 /**
  * 向 Popup 发送进度更新
  */
 function sendProgress(percent, message) {
+  if (!isExtensionContextValid()) return;
   try {
     chrome.runtime.sendMessage({
       action: "PROGRESS_UPDATE",
-      percent,
-      message
-    }).catch(() => {
+      percent: percent,
+      message: message
+    }).catch(function() {
       // 如果 Popup 已关闭，sendMessage 会报错，忽略即可
     });
   } catch (e) {
@@ -47,10 +121,14 @@ function sendProgress(percent, message) {
 
 /**
  * 处理 PDF 导出请求
+ * 返回结果对象，同时通过 sendResponse 通知（兼容两种调用方式）
  */
 async function handleExportPDF(request, sendResponse) {
+  var response;
   try {
-    const { config, pageTitle, pageUrl } = request;
+    var config = request.config || {};
+    var pageTitle = request.pageTitle;
+    var pageUrl = request.pageUrl;
 
     console.log("[PDF Exporter] 开始导出:", {
       mode: config.mode,
@@ -59,11 +137,11 @@ async function handleExportPDF(request, sendResponse) {
 
     sendProgress(10, "正在准备内容...");
 
-    let contentElement;
-    let extractedTitle = pageTitle;
+    var contentElement;
+    var extractedTitle = pageTitle;
 
     if (config.mode === "readable") {
-      const result = await extractReadableContent();
+      var result = await extractReadableContent();
       contentElement = result.element;
       extractedTitle = result.extractedTitle;
     } else {
@@ -74,27 +152,101 @@ async function handleExportPDF(request, sendResponse) {
 
     console.log("[PDF Exporter] 内容准备完成，开始生成 PDF");
 
-    const pdfResult = await generatePDF(contentElement, {
-      ...config,
-      pageTitle,
-      extractedTitle,
-      pageUrl,
+    var pdfResult = await generatePDF(contentElement, {
+      includeImages: config.includeImages,
+      includeLinks: config.includeLinks,
+      forceLightMode: config.forceLightMode,
+      fontSize: config.fontSize,
+      margin: config.margin,
+      quality: config.quality,
+      scale: config.scale,
+      pageTitle: pageTitle,
+      extractedTitle: extractedTitle,
+      pageUrl: pageUrl,
     });
 
     console.log("[PDF Exporter] PDF 生成完成:", pdfResult.filename);
 
-    sendResponse({
+    response = {
       success: true,
       dataUrl: pdfResult.dataUrl,
       filename: pdfResult.filename,
-    });
+    };
   } catch (error) {
     console.error("[PDF Exporter] 导出失败:", error);
-    sendResponse({
+    response = {
       success: false,
-      error: error.message || "未知错误",
+      error: (error && error.message) || String(error) || "未知错误",
+    };
+  }
+
+  if (typeof sendResponse === 'function') {
+    safeSendResponse(sendResponse, response);
+  }
+  return response;
+}
+
+/**
+ * 处理阅读模式 HTML 提取请求（供矢量 PDF 打印使用）
+ */
+async function handleGetReadableHTML(request, sendResponse) {
+  try {
+    var pageTitle = request.pageTitle;
+    var pageUrl = request.pageUrl;
+
+    console.log("[PDF Exporter] 提取阅读模式 HTML:", pageUrl);
+
+    var result = await extractReadableContent();
+
+    safeSendResponse(sendResponse, {
+      success: true,
+      htmlContent: result.element.outerHTML,
+      title: result.extractedTitle || pageTitle,
+    });
+  } catch (error) {
+    console.error("[PDF Exporter] 提取 HTML 失败:", error);
+    safeSendResponse(sendResponse, {
+      success: false,
+      error: (error && error.message) || String(error) || "未知错误",
     });
   }
+}
+
+/**
+ * 等待元素出现在 DOM 中（用于 SPA 页面，如 InfoQ/极客邦）
+ * @param {string} selector - CSS 选择器
+ * @param {number} timeout - 最大等待时间(ms)
+ * @returns {Promise<Element|null>}
+ */
+function waitForElement(selector, timeout) {
+  timeout = timeout || 3000;
+  return new Promise(function(resolve) {
+    var el = document.querySelector(selector);
+    if (el) {
+      resolve(el);
+      return;
+    }
+
+    var resolved = false;
+    var observer = new MutationObserver(function() {
+      var el = document.querySelector(selector);
+      if (el && !resolved) {
+        resolved = true;
+        observer.disconnect();
+        resolve(el);
+      }
+    });
+
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    setTimeout(function() {
+      if (!resolved) {
+        resolved = true;
+        observer.disconnect();
+        resolve(null);
+      }
+    }, timeout);
+  });
 }
 
 /**
@@ -103,122 +255,679 @@ async function handleExportPDF(request, sendResponse) {
 async function extractReadableContent() {
   try {
     // 检查提取函数是否存在（支持全局变量或显式挂载到 window）
-    const extractFn = typeof extract === "function" ? extract : window.extract;
-    
+    var extractFn = typeof extract === "function" ? extract : window.extract;
+
     if (typeof extractFn !== "function") {
       console.error("[PDF Exporter] Extractor function not found in global scope or window.extract");
       throw new Error("提取模块未正确加载，请尝试刷新页面");
     }
 
-    const article = extractFn(document);
+    // === Phase 1: 直接提取已知内容容器（SPA 优先路径） ===
+    var directContentSelectors = [
+      { selector: '.ProseMirror', name: 'ProseMirror' },
+      { selector: '[data-type="doc"]', name: 'data-type-doc' },
+      { selector: '#js_content', name: 'wechat' },
+      { selector: '#article_content', name: 'csdn' },
+      { selector: '#cnblogs_post_body', name: 'cnblogs' },
+      { selector: '.Post-RichTextContainer', name: 'zhihu' },
+      { selector: '.article-content', name: 'article-content' },
+      { selector: '.article-body', name: 'article-body' },
+      { selector: '.post-content', name: 'post-content' },
+      { selector: '.entry-content', name: 'entry-content' },
+    ];
 
-    const container = document.createElement("div");
-    container.className = "pdf-readable-content";
-    container.style.cssText = `
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 40px;
-      font-family: "Charter", "Georgia", "Source Serif Pro", serif;
-      line-height: 1.8;
-      color: #333;
-      background: #fff;
-    `;
+    var article = null;
+    var usedDirectExtraction = false;
 
-    const title = document.createElement("h1");
-    title.textContent = article.title || document.title;
-    title.style.cssText = `
-      font-size: 32px;
-      font-weight: 700;
-      margin-bottom: 12px;
-      color: #1a1a1a;
-      line-height: 1.3;
-    `;
-    container.appendChild(title);
+    for (var i = 0; i < directContentSelectors.length; i++) {
+      var selInfo = directContentSelectors[i];
+      try {
+        // 先立即查找
+        var elements = document.querySelectorAll(selInfo.selector);
 
-    if (article.byline) {
-      const author = document.createElement("p");
-      author.textContent = article.byline;
-      author.style.cssText = `
-        font-size: 16px;
-        color: #555;
-        margin-bottom: 8px;
-        font-weight: 500;
-      `;
-      container.appendChild(author);
+        // 如果没找到且是 SPA 关键选择器，等待渲染完成
+        if (elements.length === 0 && (selInfo.name === 'ProseMirror' || selInfo.name === 'data-type-doc')) {
+          console.log('[PDF Exporter] ' + selInfo.name + ' 未立即找到，等待 SPA 渲染...');
+          await waitForElement(selInfo.selector, 2000);
+          elements = document.querySelectorAll(selInfo.selector);
+        }
+
+        if (elements.length === 0) continue;
+
+        // 选择文本量最大的匹配元素
+        var bestEl = null;
+        var bestTextLen = 0;
+        elements.forEach(function(el) {
+          var textLen = el.textContent.trim().length;
+          if (textLen > bestTextLen) {
+            bestTextLen = textLen;
+            bestEl = el;
+          }
+        });
+
+        if (bestEl && bestTextLen > 50) {
+          console.log('[PDF Exporter] 直接提取: ' + selInfo.name + ' (' + selInfo.selector + '), 元素数: ' + elements.length + ', 文本量: ' + bestTextLen);
+
+          var cleanedHtml = cleanExtractedContent(bestEl.innerHTML);
+
+          article = {
+            title: document.title,
+            content: cleanedHtml,
+            excerpt: bestEl.textContent.trim().substring(0, 200),
+            byline: ''
+          };
+
+          // 提取作者
+          var authorSelectors = [
+            '.author-name', '.author', '.byline', '.writer',
+            '[class*="author"]', '[class*="byline"]',
+            '.com-author-name'
+          ];
+          for (var j = 0; j < authorSelectors.length; j++) {
+            var authorEl = document.querySelector(authorSelectors[j]);
+            if (authorEl && authorEl.textContent.trim()) {
+              article.byline = authorEl.textContent.trim();
+              break;
+            }
+          }
+
+          usedDirectExtraction = true;
+          break;
+        }
+      } catch(e) {
+        // 选择器无效，跳过
+      }
     }
 
-    const source = document.createElement("p");
-    source.innerHTML = `<a href="${window.location.href}" style="color: #666; text-decoration: none; border-bottom: 1px solid #ccc;">${window.location.hostname}</a>`;
-    source.style.cssText = `
-      font-size: 13px;
-      color: #999;
-      margin-bottom: 30px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid #eee;
-    `;
-    container.appendChild(source);
+    // === Phase 2: Readability 回退路径 ===
+    if (!article) {
+      console.log('[PDF Exporter] 未找到已知容器，使用 Readability 提取');
 
-    const content = document.createElement("div");
-    content.innerHTML = article.content;
-    
-    // 清理内容样式
-    content.querySelectorAll("*").forEach(el => {
-      el.style.maxWidth = "100%";
-      el.style.height = "auto";
+      // 1. 标记隐藏元素
+      document.querySelectorAll('*').forEach(function(el) {
+        try {
+          var computed = window.getComputedStyle(el);
+          if (computed.display === 'none' || computed.visibility === 'hidden') {
+            el.setAttribute('data-pdf-hidden', 'true');
+          }
+        } catch(e) {}
+      });
+
+      // 2. 克隆文档
+      var markedClone = document.cloneNode(true);
+      markedClone.querySelectorAll('[data-pdf-hidden="true"]').forEach(function(el) { el.remove(); });
+
+      // 3. 全局噪声清理（Readability 路径）
+      var noiseSelectors = [
+        'nav', 'footer', 'aside', 'header',
+        '[role="navigation"]', '[role="complementary"]', '[role="banner"]',
+        '[role="contentinfo"]', '[role="search"]', '[role="alert"]',
+        '.nav', '.navigation', '.navbar', '.breadcrumb', '.breadcrumbs',
+        '.aside', '.sidebar', '.side-bar', '.side_panel',
+        '.footer', '.header', '.topbar', '.top-bar',
+        '.ad', '.ads', '.advertisement', '.ad-container', '.ad-wrapper',
+        '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
+        '.social-share', '.share-bar', '.share-btn', '.toolbar', '.float-toolbar',
+        '.back-top', '.back-to-top', '.go-top',
+        '.related-news', '.recommend-articles', '.hot-topics',
+        '.recommend', '.related', '.trending',
+        '[class*="recommend"]', '[class*="related"]',
+        '.comments-container', '.comments', '#comments', '.comment-list',
+        '[class*="comment"]',
+        '.mask', '.overlay', '.modal', '.dialog', '.popup', '.layer',
+        '.float-layer', '.float-bar', '.fixed-bar', '.sticky-bar',
+        '[class*="popup"]', '[class*="modal"]', '[class*="dialog"]',
+        '[class*="float-"]', '[class*="sticky-"]',
+        '.user-action', '.login-prompt', '.login-panel',
+        '.user-panel', '.auth-panel',
+        '.copyright', '.site-info', '.footer-info',
+        'script', 'style', 'noscript', 'iframe',
+        '[class*="share"]', '[class*="social"]',
+        '[class*="widget"]', '[class*="banner"]',
+        '[class*="skeleton"]', '[class*="placeholder"]', '[class*="loading"]',
+        '.article-widget-head', '.widget-operation-skeleton',
+        '.com-author-name', '.audio-player-skeleton',
+        '[class*="_content-side"]', '[class*="_operation-bar"]',
+        '[class*="_topic-nav"]', '[class*="_sub-nav"]',
+        '[class*="_layout-footer"]', '[class*="_nav-list"]',
+        '[class*="_article-cover"]', '[class*="_audio-wrap"]',
+        '[class*="sidebar"]', '[class*="Sidebar"]',
+        '[class*="side-bar"]', '[class*="SideBar"]',
+        '[class*="aside"]', '[class*="Aside"]',
+        '[class*="operation-bar"]', '[class*="OperationBar"]',
+        '[class*="action-bar"]', '[class*="ActionBar"]',
+        'button', 'input', 'textarea', 'select',
+      ];
+
+      noiseSelectors.forEach(function(selector) {
+        try {
+          markedClone.querySelectorAll(selector).forEach(function(el) {
+            var text = el.textContent.trim();
+            if (text.length > 300) {
+              var links = el.querySelectorAll('a');
+              var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
+              var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
+              if (linkDensity < 0.25) return;
+            }
+            el.remove();
+          });
+        } catch(e) {}
+      });
+
+      // 链接密度清理
+      markedClone.querySelectorAll('div, section, ul, aside').forEach(function(el) {
+        if (el === markedClone.body || el === markedClone.documentElement) return;
+        var text = el.textContent.trim();
+        if (text.length < 20) { el.remove(); return; }
+        var links = el.querySelectorAll('a');
+        if (links.length === 0) return;
+        var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
+        var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
+        if (linkDensity > 0.6 && text.length < 2000) { el.remove(); return; }
+        if (links.length > 10 && text.length < 500) { el.remove(); return; }
+      });
+
+      // 处理延迟加载图片
+      markedClone.querySelectorAll('img').forEach(function(img) {
+        var lazySrc = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src');
+        if (lazySrc && (!img.src || img.src.startsWith('data:'))) {
+          img.src = lazySrc;
+        }
+      });
+
+      // Readability 提取
+      try {
+        article = extractFn(markedClone);
+      } catch(e) {
+        console.warn('[PDF Exporter] Readability 提取失败:', e);
+        article = extractFn(document);
+      }
+
+      if (!article || !article.content || article.content.trim().length < 50) {
+        article = extractFn(document);
+      }
+    }
+
+    // 2. 构建阅读模式容器
+    var container = document.createElement("div");
+    container.className = "pdf-readable-content";
+    container.style.cssText = "max-width: 850px; margin: 0 auto; padding: 40px; font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"PingFang SC\", \"Microsoft YaHei\", sans-serif; line-height: 1.8; color: #2c3e50; background: #fff; word-wrap: break-word;";
+
+    // 标题与元数据
+    var titleEl = document.createElement("h1");
+    titleEl.textContent = article.title || document.title;
+    titleEl.style.cssText = "font-size: 34px; font-weight: 700; margin-bottom: 24px; color: #1a1a1a; line-height: 1.3; border-bottom: 2px solid #f0f0f0; padding-bottom: 15px;";
+    container.appendChild(titleEl);
+
+    if (article.byline) {
+      var authorP = document.createElement("p");
+      authorP.textContent = article.byline;
+      authorP.style.cssText = "font-size: 16px; color: #666; margin-bottom: 10px; font-weight: 500;";
+      container.appendChild(authorP);
+    }
+
+    var sourceP = document.createElement("p");
+    sourceP.innerHTML = "来源: <a href=\"" + window.location.href + "\" style=\"color: #3498db; text-decoration: none;\">" + window.location.hostname + "</a>";
+    sourceP.style.cssText = "font-size: 13px; color: #999; margin-bottom: 35px;";
+    container.appendChild(sourceP);
+
+    // 正文内容净化
+    var contentDiv = document.createElement("div");
+    contentDiv.className = "article-body";
+    contentDiv.innerHTML = article.content;
+
+    // 3. 内容规范化
+    try {
+      normalizeContent(contentDiv);
+    } catch (normErr) {
+      console.warn('[PDF Exporter] normalizeContent 出错，使用原始内容:', normErr);
+    }
+
+    // 4. 对提取后的内容进行二次深度净化（基于选择器）
+    var postCleanSelectors = [
+      '[class*="share"]', '[id*="share"]',
+      '[class*="social"]', '[id*="social"]',
+      '[class*="recommend"]', '[id*="recommend"]',
+      '[class*="related"]', '[id*="related"]',
+      '[class*="ad-"]', '[class*="ads-"]',
+      '[class*="advert"]', '[id*="ad-"]', '[id*="ads-"]',
+      '[class*="nav"]', '[id*="nav"]',
+      '[class*="breadcrumb"]', '[id*="breadcrumb"]',
+      '[class*="sidebar"]', '[id*="sidebar"]',
+      '[class*="side-bar"]', '[class*="side_panel"]',
+      '[class*="comment"]', '[id*="comment"]',
+      '[class*="popup"]', '[class*="modal"]',
+      '[class*="dialog"]', '[class*="overlay"]',
+      '[class*="float-"]', '[class*="sticky-"]',
+      '[class*="fixed-"]',
+      '[class*="toolbar"]', '[class*="tool-bar"]',
+      '[class*="action-bar"]', '[class*="actionbar"]',
+      '[class*="copyright"]', '[class*="footer"]',
+      '[id*="footer"]',
+      '[class*="login"]', '[class*="signup"]',
+      '[class*="register"]', '[class*="auth-"]',
+      '[class*="widget"]', '[id*="widget"]',
+      '[class*="banner"]', '[id*="banner"]',
+      'button', 'script', 'style', 'noscript', 'iframe',
+      'svg.icon', 'svg[class*="icon"]',
+    ];
+
+    postCleanSelectors.forEach(function(selector) {
+      try {
+        contentDiv.querySelectorAll(selector).forEach(function(el) {
+          var text = el.textContent.trim();
+          var links = el.querySelectorAll('a');
+          var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
+          var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
+          if (text.length > 200 && linkDensity < 0.3) {
+            return;
+          }
+          el.remove();
+        });
+      } catch(e) {}
     });
 
-    container.appendChild(content);
+    // 4b. 链接密度清理
+    var postBlockElements = contentDiv.querySelectorAll('div, section, aside, ul');
+    postBlockElements.forEach(function(el) {
+      var text = el.textContent.trim();
+      if (text.length < 15) { el.remove(); return; }
+      var links = el.querySelectorAll('a');
+      if (links.length === 0) return;
+      var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
+      var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
+      if (linkDensity > 0.6 && text.length < 1500) { el.remove(); return; }
+      if (links.length > 8 && text.length < 300) { el.remove(); return; }
+    });
+
+    // 4c. 移除空元素
+    contentDiv.querySelectorAll('div, span').forEach(function(el) {
+      if (el.children.length === 0 && el.textContent.trim() === '' && !el.querySelector('img')) {
+        el.remove();
+      }
+    });
+
+    // 5. 强制重置所有元素的布局样式
+    contentDiv.querySelectorAll("*").forEach(function(el) {
+      var tagName = el.tagName.toLowerCase();
+      var isTable = ['table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption'].indexOf(tagName) !== -1;
+      var isImage = tagName === 'img';
+
+      el.removeAttribute('class');
+      el.removeAttribute('width');
+      el.removeAttribute('height');
+      el.removeAttribute('align');
+      el.removeAttribute('valign');
+      el.removeAttribute('border');
+
+      if (isImage) {
+        el.style.maxWidth = '100%';
+        el.style.height = 'auto';
+        el.style.display = 'block';
+        el.style.margin = '25px auto';
+        return;
+      }
+
+      if (isTable) {
+        if (tagName === 'table') {
+          el.style.width = '100%';
+          el.style.borderCollapse = 'collapse';
+          el.style.margin = '25px 0';
+        }
+        if (tagName === 'th' || tagName === 'td') {
+          el.style.border = '1px solid #ddd';
+          el.style.padding = '12px';
+          el.style.textAlign = 'left';
+        }
+        return;
+      }
+    });
+
+    // 5. 注入补全样式
+    var styleFix = document.createElement("style");
+    styleFix.textContent = '\
+      .article-body { font-size: 17px; color: #2c3e50; }\
+      .article-body * { box-sizing: border-box; position: static !important; float: none !important; }\
+      .article-body div, .article-body section, .article-body article, .article-body p, .article-body h1, .article-body h2, .article-body h3, .article-body h4, .article-body h5, .article-body h6, .article-body ul, .article-body ol, .article-body blockquote, .article-body pre, .article-body figure, .article-body table { clear: both; }\
+      .article-body p { margin-bottom: 1.6em; text-align: justify; }\
+      .article-body img { max-width: 100% !important; height: auto !important; display: block; margin: 25px auto; border-radius: 4px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }\
+      .article-body h1 { font-size: 28px; margin: 35px 0 18px; font-weight: 700; color: #1a1a1a; }\
+      .article-body h2 { font-size: 26px; margin: 40px 0 20px; font-weight: 700; color: #1a1a1a; }\
+      .article-body h3 { font-size: 20px; margin: 30px 0 15px; font-weight: 600; color: #333; }\
+      .article-body h4 { font-size: 18px; margin: 25px 0 12px; font-weight: 600; color: #444; }\
+      .article-body pre { background: #f8f9fa; padding: 20px; border-radius: 8px; overflow: auto; margin: 25px 0; border: 1px solid #eee; white-space: pre-wrap; word-wrap: break-word; }\
+      .article-body code { font-family: "Fira Code", "Consolas", monospace; font-size: 0.9em; background: #f1f1f1; padding: 2px 5px; border-radius: 3px; }\
+      .article-body pre code { background: none; padding: 0; font-size: 0.9em; }\
+      .article-body blockquote { border-left: 5px solid #e0e0e0; padding-left: 20px; color: #777; font-style: italic; margin: 25px 0; }\
+      .article-body ul, .article-body ol { padding-left: 25px; margin-bottom: 25px; }\
+      .article-body li { margin-bottom: 8px; }\
+      .article-body a { color: #3498db; text-decoration: none; border-bottom: 1px solid #e0e0e0; }\
+      .article-body a:hover { border-bottom-color: #3498db; }\
+      .article-body table { width: 100%; border-collapse: collapse; margin: 25px 0; }\
+      .article-body th, .article-body td { border: 1px solid #ddd; padding: 12px; text-align: left; }\
+      .article-body th { background: #f5f5f5; font-weight: 600; }\
+      .article-body tr:nth-child(even) { background-color: #f9f9f9; }\
+      .article-body figure { margin: 25px 0; text-align: center; }\
+      .article-body figcaption { font-size: 14px; color: #999; margin-top: 8px; }\
+      .article-body div { max-width: 100%; overflow-wrap: break-word; }\
+    ';
+    container.appendChild(styleFix);
+    container.appendChild(contentDiv);
+
+    // 6. 清理原始文档中的标记属性
+    document.querySelectorAll('[data-pdf-hidden], [data-pdf-positioned]').forEach(function(el) {
+      el.removeAttribute('data-pdf-hidden');
+      el.removeAttribute('data-pdf-positioned');
+    });
 
     return {
       element: container,
       extractedTitle: article.title || document.title
     };
   } catch (error) {
+    try {
+      document.querySelectorAll('[data-pdf-hidden], [data-pdf-positioned]').forEach(function(el) {
+        el.removeAttribute('data-pdf-hidden');
+        el.removeAttribute('data-pdf-positioned');
+      });
+    } catch(e) {}
+
     console.error("[PDF Exporter] 提取失败:", error);
     throw error;
   }
 }
 
 /**
+ * 清理直接提取的 HTML 内容，移除常见的噪声元素
+ */
+function cleanExtractedContent(html) {
+  var parser = new DOMParser();
+  var doc = parser.parseFromString(html, 'text/html');
+  var body = doc.body;
+
+  var innerNoiseSelectors = [
+    '.com-author-name', '.author-name', '.author-info',
+    '.head-detail', '.article-widget-head',
+    '.audio-player-skeleton', '.audio-wrap', '[class*="audio"]',
+    '[class*="operation-bar"]', '[class*="OperationBar"]',
+    '[class*="action-bar"]', '[class*="ActionBar"]',
+    '[class*="share"]', '[id*="share"]',
+    '[class*="recommend"]', '[id*="recommend"]',
+    '[class*="related"]', '[id*="related"]',
+    '[class*="comment"]', '[id*="comment"]',
+    '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
+    '[class*="popup"]', '[class*="modal"]', '[class*="dialog"]',
+    '[class*="overlay"]', '[class*="float-"]', '[class*="sticky-"]',
+    '[class*="skeleton"]', '[class*="placeholder"]',
+    'button', 'input[type="button"]', 'input[type="submit"]',
+  ];
+
+  innerNoiseSelectors.forEach(function(selector) {
+    try {
+      body.querySelectorAll(selector).forEach(function(el) {
+        var text = el.textContent.trim();
+        var links = el.querySelectorAll('a');
+        var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
+        var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
+        if (text.length > 200 && linkDensity < 0.3) return;
+        el.remove();
+      });
+    } catch(e) {}
+  });
+
+  var noisePatterns = [
+    /^\s*作者[：:]\s*/i,
+    /^\s*来源[：:]\s*/i,
+    /^\s*原文链接[：:]\s*/i,
+    /^\s*本文字数[：:]\s*/i,
+    /^\s*阅读完需[：:]\s*/i,
+    /^\s*推荐阅读\s*$/i,
+    /^\s*相关推荐\s*$/i,
+    /^\s*热门文章\s*$/i,
+    /^\s*精选集\s*$/i,
+    /^\s*立即下载\s*$/i,
+    /^\s*大小[：:]\s*\d/i,
+    /^\s*时长[：:]\s*\d/i,
+    /^\s*\d+\.\d+M\s*$/i,
+    /^\s*\d+:\d+\s*$/i,
+  ];
+
+  body.querySelectorAll('p, div, span, li').forEach(function(el) {
+    var text = el.textContent.trim();
+    for (var i = 0; i < noisePatterns.length; i++) {
+      if (noisePatterns[i].test(text)) {
+        el.remove();
+        break;
+      }
+    }
+  });
+
+  body.querySelectorAll('p, div, span').forEach(function(el) {
+    if (el.children.length === 0 && el.textContent.trim() === '' && !el.querySelector('img')) {
+      el.remove();
+    }
+  });
+
+  return body.innerHTML;
+}
+
+/**
+ * 内容规范化：将各站自定义 HTML 转换为标准 HTML
+ */
+function normalizeContent(container) {
+  // 1a. 处理缩进段落
+  for (var i = 1; i <= 8; i++) {
+    container.querySelectorAll('[data-indent-' + i + ']').forEach(function(el) {
+      el.style.marginLeft = (i * 24) + 'px';
+      el.removeAttribute('data-indent-' + i);
+    });
+  }
+
+  // 1b. 处理对齐
+  container.querySelectorAll('[data-align-right]').forEach(function(el) {
+    el.style.textAlign = 'right';
+    el.removeAttribute('data-align-right');
+  });
+  container.querySelectorAll('[data-align-center]').forEach(function(el) {
+    el.style.textAlign = 'center';
+    el.removeAttribute('data-align-center');
+  });
+
+  // 1c. 处理图片容器
+  container.querySelectorAll('[data-type="image"]').forEach(function(wrapper) {
+    var img = wrapper.querySelector('img');
+    if (img) {
+      var newImg = document.createElement('img');
+      newImg.src = img.src;
+      newImg.alt = img.alt || '';
+      var widthAttr = wrapper.getAttribute('data-style-width');
+      if (widthAttr) newImg.style.width = widthAttr;
+      wrapper.parentNode.replaceChild(newImg, wrapper);
+    } else {
+      wrapper.remove();
+    }
+  });
+
+  // 1d. 处理代码块
+  container.querySelectorAll('[data-type="codeblock"]').forEach(function(block) {
+    block.querySelectorAll('[data-codeblock-copy], [data-codeblock-explain]').forEach(function(btn) { btn.remove(); });
+    block.querySelectorAll('[data-codeblock-index]').forEach(function(idx) { idx.remove(); });
+
+    var codeLines = [];
+    block.querySelectorAll('[data-type="codeline"]').forEach(function(line) {
+      codeLines.push(line.textContent);
+    });
+
+    if (codeLines.length > 0) {
+      var pre = document.createElement('pre');
+      var code = document.createElement('code');
+      code.textContent = codeLines.join('\n');
+      pre.appendChild(code);
+      block.parentNode.replaceChild(pre, block);
+    } else {
+      var text = block.textContent.trim();
+      if (text) {
+        var pre2 = document.createElement('pre');
+        var code2 = document.createElement('code');
+        code2.textContent = text;
+        pre2.appendChild(code2);
+        block.parentNode.replaceChild(pre2, block);
+      } else {
+        block.remove();
+      }
+    }
+  });
+
+  // 1e. 行内代码
+  container.querySelectorAll('[data-type="codeinline"]').forEach(function(el) {
+    var code = document.createElement('code');
+    code.textContent = el.textContent;
+    el.parentNode.replaceChild(code, el);
+  });
+
+  // 1f. 链接
+  container.querySelectorAll('[data-type="link"]').forEach(function(el) {
+    var a = document.createElement('a');
+    a.href = el.getAttribute('href') || '#';
+    a.textContent = el.textContent;
+    el.parentNode.replaceChild(a, el);
+  });
+
+  // 1g. 视频
+  container.querySelectorAll('[data-type="video"]').forEach(function(wrapper) {
+    var iframeEl = wrapper.querySelector('iframe');
+    if (iframeEl && iframeEl.src) {
+      var p = document.createElement('p');
+      p.style.color = '#999';
+      p.style.fontStyle = 'italic';
+      p.textContent = '[视频: ' + iframeEl.src + ']';
+      wrapper.parentNode.replaceChild(p, wrapper);
+    } else {
+      wrapper.remove();
+    }
+  });
+
+  // 2a. 移除 data-* 属性
+  container.querySelectorAll('*').forEach(function(el) {
+    var attrs = Array.from(el.attributes);
+    attrs.forEach(function(attr) {
+      if (attr.name.startsWith('data-')) {
+        el.removeAttribute(attr.name);
+      }
+    });
+  });
+
+  // 2b. 列表结构清理
+  container.querySelectorAll('ul, ol').forEach(function(list) {
+    var children = Array.from(list.children);
+    children.forEach(function(child) {
+      if (child.tagName === 'P') {
+        var li = document.createElement('li');
+        li.innerHTML = child.innerHTML;
+        list.replaceChild(li, child);
+      }
+    });
+  });
+
+  // 2c. 扁平化嵌套 div
+  var changed = true;
+  var iterations = 0;
+  while (changed && iterations < 5) {
+    changed = false;
+    iterations++;
+    container.querySelectorAll('div').forEach(function(div) {
+      if (div.querySelector('img')) return;
+      if (div.children.length === 1 && div.childNodes.length === 1) {
+        var child = div.children[0];
+        if (child.tagName === 'DIV' || child.tagName === 'P') {
+          div.parentNode.replaceChild(child, div);
+          changed = true;
+        }
+      }
+    });
+  }
+
+  // 2d. 清理属性
+  var allowedAttrs = {
+    'a': ['href', 'title'],
+    'img': ['src', 'alt'],
+    'table': ['border'],
+    'th': ['colspan', 'rowspan'],
+    'td': ['colspan', 'rowspan'],
+  };
+
+  container.querySelectorAll('*').forEach(function(el) {
+    var tagName = el.tagName.toLowerCase();
+    var allowed = allowedAttrs[tagName] || [];
+    var attrs = Array.from(el.attributes);
+    attrs.forEach(function(attr) {
+      if (allowed.indexOf(attr.name) === -1 && attr.name !== 'style') {
+        el.removeAttribute(attr.name);
+      }
+    });
+  });
+
+  // 2e. 移除空元素
+  container.querySelectorAll('p, div').forEach(function(el) {
+    if (!el.querySelector('img') && el.textContent.trim() === '' && el.children.length === 0) {
+      el.remove();
+    }
+  });
+}
+
+/**
  * 克隆整个文档用于导出
  */
 function cloneDocumentForExport(config) {
-  return new Promise((resolve, reject) => {
+  return new Promise(function(resolve, reject) {
     try {
-      const container = document.createElement("div");
+      var container = document.createElement("div");
       container.className = "pdf-export-container";
-      container.style.cssText = `
-        width: 100%;
-        min-height: 100vh;
-        background: white;
-        padding: 20px;
-      `;
+      container.style.cssText = "width: 100%; min-height: 100vh; background: white; padding: 20px;";
 
-      // 递归克隆并过滤不可见元素 (Task 1)
       function safeClone(node) {
         if (node.nodeType === Node.TEXT_NODE) {
           return node.cloneNode(true);
         }
-        
-        if (node.nodeType !== Node.ELEMENT_NODE) {
-          return null;
-        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return null;
 
-        // 过滤不需要的标签
-        const tagName = node.tagName.toUpperCase();
-        if (['SCRIPT', 'NOSCRIPT', 'STYLE', 'IFRAME', 'VIDEO', 'AUDIO'].includes(tagName)) {
-          return null;
-        }
+        var tagName = node.tagName.toUpperCase();
+        if (['SCRIPT', 'NOSCRIPT', 'STYLE', 'IFRAME', 'VIDEO', 'AUDIO'].indexOf(tagName) !== -1) return null;
 
-        // 过滤不可见元素
-        const style = window.getComputedStyle(node);
-        if (style.display === 'none' || style.visibility === 'hidden') {
-          return null;
-        }
+        var style = window.getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden') return null;
 
-        const clone = node.cloneNode(false);
-        
-        // 处理图片跨域
+        var clone = node.cloneNode(false);
+
+        try {
+          var fontFamily = style.fontFamily;
+          if (fontFamily && fontFamily.indexOf(',') !== -1) {
+            clone.style.setProperty('font-family', fontFamily.split(',')[0].trim(), 'important');
+          }
+          if (style.backgroundImage && style.backgroundImage.indexOf(',') !== -1) {
+            clone.style.setProperty('background-image', 'none', 'important');
+          }
+          if (style.background && style.background.indexOf(',') !== -1) {
+            clone.style.setProperty('background', style.backgroundColor || 'white', 'important');
+          }
+          if (style.boxShadow && style.boxShadow !== 'none' && style.boxShadow.indexOf('),') !== -1) {
+            clone.style.setProperty('box-shadow', 'none', 'important');
+          }
+          if (style.textShadow && style.textShadow !== 'none' && style.textShadow.indexOf(',') !== -1) {
+            clone.style.setProperty('text-shadow', 'none', 'important');
+          }
+          if (style.filter && style.filter !== 'none') clone.style.setProperty('filter', 'none', 'important');
+          if (style.transition && style.transition !== 'none') clone.style.setProperty('transition', 'none', 'important');
+
+          var inlineStyle = node.getAttribute('style') || '';
+          if (inlineStyle.indexOf('var(') !== -1 || inlineStyle.indexOf('calc(') !== -1) {
+            clone.style.width = style.width;
+            clone.style.height = style.height;
+            clone.style.margin = style.margin;
+            clone.style.padding = style.padding;
+          }
+        } catch (e) {}
+
         if (tagName === 'IMG') {
           if (!config.includeImages) {
             clone.style.display = 'none';
@@ -227,23 +936,16 @@ function cloneDocumentForExport(config) {
           }
         }
 
-        // 递归克隆子节点
-        for (const child of node.childNodes) {
-          const childClone = safeClone(child);
-          if (childClone) {
-            clone.appendChild(childClone);
-          }
+        for (var i = 0; i < node.childNodes.length; i++) {
+          var childClone = safeClone(node.childNodes[i]);
+          if (childClone) clone.appendChild(childClone);
         }
 
         return clone;
       }
 
-      const bodyClone = safeClone(document.body);
-      if (bodyClone) {
-        // 将克隆的内容放入容器，而不是 bodyClone 本身（避免样式冲突）
-        container.innerHTML = bodyClone.innerHTML;
-      }
-
+      var bodyClone = safeClone(document.body);
+      if (bodyClone) container.appendChild(bodyClone);
       resolve(container);
     } catch (error) {
       reject(error);
@@ -257,148 +959,99 @@ function cloneDocumentForExport(config) {
 async function generatePDF(element, options) {
   await loadLibraries();
 
-  const { pageTitle, extractedTitle, pageUrl, scale, fontSize, margin, quality, forceLightMode } = options;
+  var pageTitle = options.pageTitle;
+  var extractedTitle = options.extractedTitle;
+  var pageUrl = options.pageUrl;
+  var scale = options.scale;
+  var fontSize = options.fontSize;
+  var margin = options.margin;
+  var quality = options.quality;
+  var forceLightMode = options.forceLightMode;
 
-  // 优先使用提取的标题
-  const displayTitle = extractedTitle || pageTitle || "未命名页面";
-  
-  const safeTitle =
-    displayTitle
-      .replace(/[<>:"/\\|?*]/g, "_")
-      .replace(/\s+/g, " ")
-      .trim();
+  var displayTitle = extractedTitle || pageTitle || "未命名页面";
 
-  const filename = `${safeTitle}.pdf`;
+  var safeTitle = displayTitle
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  const iframe = document.createElement("iframe");
-  iframe.style.cssText = `
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 1200px;
-    height: 100vh;
-    border: none;
-    z-index: 999999;
-    background: white;
-    visibility: hidden;
-  `;
+  var filename = safeTitle + ".pdf";
+
+  var iframe = document.createElement("iframe");
+  iframe.style.cssText = "position: fixed; top: 0; left: 0; width: 1200px; height: 100vh; border: none; z-index: 999999; background: white; visibility: hidden;";
   document.body.appendChild(iframe);
 
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await new Promise(function(resolve) { setTimeout(resolve, 50); });
 
-  const htmlContent = `
-    <!DOCTYPE html>
-    <html ${forceLightMode ? 'style="color-scheme: light !important;"' : ''}>
-    <head>
-      <meta charset="UTF-8">
-      <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-          font-family: "Charter", "Georgia", "Source Serif Pro", serif;
-          font-size: ${typeof fontSize === 'number' ? fontSize + 'px' : (fontSize || '16px')};
-          line-height: 1.6;
-          color: #333;
-          background: white;
-          padding: 0;
-          -webkit-print-color-adjust: exact !important;
-        }
-        ${forceLightMode ? `
-          :root { color-scheme: light !important; }
-          body { background: white !important; color: #000 !important; }
-          /* 覆盖常见的深色模式变量 */
-          [data-theme='dark'], .dark, .dark-mode {
-            background-color: #fff !important;
-            color: #000 !important;
-          }
-        ` : ''}
-        img { max-width: 100%; height: auto; display: block; margin: 10px auto; }
-        .pdf-readable-content { padding: 0; }
-        h1 { margin-top: 0; }
-      </style>
-    </head>
-    <body>
-      ${element.innerHTML}
-    </body>
-    </html>
-  `;
+  var forceLightAttr = forceLightMode ? 'style="color-scheme: light !important;"' : '';
+  var fontSizeVal = typeof fontSize === 'number' ? fontSize + 'px' : (fontSize || '16px');
+  var lightModeCSS = forceLightMode ? ':root { color-scheme: light !important; } body { background: white !important; color: #000 !important; } [data-theme="dark"], .dark, .dark-mode { background-color: #fff !important; color: #000 !important; }' : '';
+
+  var htmlContent = '<!DOCTYPE html><html ' + forceLightAttr + '><head><meta charset="UTF-8"><style>* { box-sizing: border-box; margin: 0; padding: 0; }body { font-family: "Charter", "Georgia", "Source Serif Pro", serif; font-size: ' + fontSizeVal + '; line-height: 1.6; color: #333; background: white; padding: 0; -webkit-print-color-adjust: exact !important; }' + lightModeCSS + 'img { max-width: 100%; height: auto; display: block; margin: 10px auto; }.pdf-readable-content { padding: 0; }h1 { margin-top: 0; }</style></head><body>' + element.innerHTML + '</body></html>';
 
   iframe.contentDocument.open();
   iframe.contentDocument.write(htmlContent);
   iframe.contentDocument.close();
 
-  // 检测高度并自动调整 scale (Task 1)
-  const contentHeight = iframe.contentDocument.body.scrollHeight;
-  let finalScale = scale || 2;
-  
+  var contentHeight = iframe.contentDocument.body.scrollHeight;
+  var finalScale = scale || 2;
+
   if (contentHeight > 10000) {
     finalScale = 1.0;
     sendProgress(60, "检测到超长网页，已自动优化渲染性能...");
-    console.log(`[PDF Exporter] 检测到超长网页 (${contentHeight}px)，将 scale 降至 ${finalScale}`);
+    console.log('[PDF Exporter] 检测到超长网页 (' + contentHeight + 'px)，将 scale 降至 ' + finalScale);
   } else if (contentHeight > 5000) {
     finalScale = 1.5;
     sendProgress(60, "检测到长网页，已自动优化渲染性能...");
-    console.log(`[PDF Exporter] 检测到长网页 (${contentHeight}px)，将 scale 降至 ${finalScale}`);
+    console.log('[PDF Exporter] 检测到长网页 (' + contentHeight + 'px)，将 scale 降至 ' + finalScale);
   }
 
-  const images = iframe.contentDocument.querySelectorAll("img");
-  
-  // 增强图片处理逻辑 (Task 1)
+  var images = iframe.contentDocument.querySelectorAll("img");
   sendProgress(50, "正在处理跨域图片...");
-  
+
   await Promise.all(
-    Array.from(images).map(
-      (img) =>
-        new Promise(async (resolve) => {
-          if (img.complete && img.naturalWidth > 0) {
-            resolve();
-            return;
-          }
+    Array.from(images).map(function(img) {
+      return new Promise(async function(resolve) {
+        if (img.complete && img.naturalWidth > 0) { resolve(); return; }
 
-          const timeout = setTimeout(() => {
-            console.warn("[PDF Exporter] 图片加载超时:", img.src);
-            resolve();
-          }, 5000);
+        var timeout = setTimeout(function() {
+          console.warn("[PDF Exporter] 图片加载超时:", img.src);
+          resolve();
+        }, 5000);
 
-          img.onload = () => {
-            clearTimeout(timeout);
-            resolve();
-          };
-          
-          img.onerror = async () => {
-            clearTimeout(timeout);
-            // 如果加载失败，尝试通过 fetch 转换为 DataURL (Task 1)
-            if (img.src && !img.src.startsWith("data:") && !img.src.startsWith("blob:")) {
-              try {
-                const response = await fetch(img.src).catch(() => null);
-                if (response && response.ok) {
-                  const blob = await response.blob();
-                  img.src = await blobToDataURL(blob);
-                  // 重新加载 DataURL 不需要很长时间
-                  img.onload = resolve;
-                  img.onerror = resolve;
-                  return;
-                }
-              } catch (e) {
-                console.warn("[PDF Exporter] 修复图片失败:", img.src);
+        img.onload = function() { clearTimeout(timeout); resolve(); };
+
+        img.onerror = async function() {
+          clearTimeout(timeout);
+          if (img.src && !img.src.startsWith("data:") && !img.src.startsWith("blob:")) {
+            try {
+              var response = await fetch(img.src).catch(function() { return null; });
+              if (response && response.ok) {
+                var blob = await response.blob();
+                img.src = await blobToDataURL(blob);
+                img.onload = resolve;
+                img.onerror = resolve;
+                return;
               }
+            } catch (e) {
+              console.warn("[PDF Exporter] 修复图片失败:", img.src);
             }
-            resolve();
-          };
-
-          // 触发加载
-          if (img.src) {
-            const currentSrc = img.src;
-            img.src = "";
-            img.src = currentSrc;
-          } else {
-            resolve();
           }
-        }),
-    ),
+          resolve();
+        };
+
+        if (img.src) {
+          var currentSrc = img.src;
+          img.src = "";
+          img.src = currentSrc;
+        } else {
+          resolve();
+        }
+      });
+    })
   );
 
-  // 映射页边距配置 (D-05)
-  let marginConfig = [15, 15, 15, 15]; // 默认 normal
+  var marginConfig = [15, 15, 15, 15];
   if (margin === 'narrow' || margin === 5) {
     marginConfig = [5, 5, 5, 5];
   } else if (margin === 'wide' || margin === 25 || margin === 30) {
@@ -409,7 +1062,7 @@ async function generatePDF(element, options) {
     marginConfig = margin;
   }
 
-  const opt = {
+  var opt = {
     margin: marginConfig,
     filename: filename,
     image: { type: "jpeg", quality: quality || 0.95 },
@@ -432,7 +1085,7 @@ async function generatePDF(element, options) {
     console.log("[PDF Exporter] 生成 PDF...");
     sendProgress(70, "正在生成 PDF 页面...");
 
-    const pdfBlob = await html2pdf()
+    var pdfBlob = await html2pdf()
       .set(opt)
       .from(iframe.contentDocument.body)
       .output("blob");
@@ -441,17 +1094,11 @@ async function generatePDF(element, options) {
 
     console.log("[PDF Exporter] PDF 大小:", (pdfBlob.size / 1024).toFixed(2), "KB");
 
-    const dataUrl = await blobToDataURL(pdfBlob);
-
+    var dataUrl = await blobToDataURL(pdfBlob);
     iframe.remove();
-
     sendProgress(100, "生成完成！");
 
-    return {
-      filename,
-      dataUrl,
-      blob: pdfBlob,
-    };
+    return { filename: filename, dataUrl: dataUrl, blob: pdfBlob };
   } catch (error) {
     console.error("[PDF Exporter] 错误:", error);
     if (iframe.parentNode) iframe.remove();
@@ -463,9 +1110,9 @@ async function generatePDF(element, options) {
  * Blob 转 Data URL
  */
 function blobToDataURL(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
+  return new Promise(function(resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function() { resolve(reader.result); };
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
@@ -475,11 +1122,10 @@ function blobToDataURL(blob) {
  * 动态加载必要的库
  */
 async function loadLibraries() {
-  if (window.html2pdf) {
-    return;
-  }
+  if (window.html2pdf) return;
 
-  await loadScript(chrome.runtime.getURL("lib/html2pdf.bundle.min.js"));
+  var scriptUrl = chrome.runtime.getURL("lib/html2pdf.bundle.min.js");
+  await loadScript(scriptUrl);
 
   if (!window.html2pdf) {
     throw new Error("无法加载 html2pdf 库");
@@ -490,11 +1136,77 @@ async function loadLibraries() {
  * 动态加载脚本
  */
 function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
+  return new Promise(function(resolve, reject) {
+    var script = document.createElement("script");
     script.src = src;
     script.onload = resolve;
-    script.onerror = () => reject(new Error(`无法加载: ${src}`));
+    script.onerror = function() { reject(new Error("无法加载: " + src)); };
     document.head.appendChild(script);
   });
 }
+
+/**
+ * 全局入口函数——供 popup 通过 chrome.scripting.executeScript 直接调用
+ * 完全绕过 chrome.tabs.sendMessage，避免 iframe 中失效的旧脚本截获消息导致通道断开
+ *
+ * 注意：exportPDF 操作直接在 content script 中触发下载，
+ * 不返回 dataUrl（大数据无法通过 executeScript 结果序列化传回）
+ */
+window.__pdfExporterHandleAction = async function(action, params) {
+  params = params || {};
+  try {
+    if (action === 'exportPDF') {
+      var result = await handleExportPDF({
+        config: params.config || {},
+        pageTitle: params.pageTitle || document.title,
+        pageUrl: params.pageUrl || location.href,
+      });
+      if (result.success && result.dataUrl) {
+        // 把下载信息暂存到 window 上，供 popup 通过 executeScript 取回
+        // dataUrl 太大无法通过 executeScript 的返回值直接序列化传递
+        window.__pdfExporterPendingDownload = {
+          dataUrl: result.dataUrl,
+          filename: result.filename,
+        };
+        return { success: true, filename: result.filename, hasDownload: true };
+      }
+      return result;
+    }
+    if (action === 'EXTRACT_CONTENT') {
+      var result = await handleExportPDF({
+        config: Object.assign({}, params.config || {}, { mode: 'readable' }),
+        pageTitle: params.pageTitle || document.title,
+        pageUrl: params.pageUrl || location.href,
+      });
+      if (result.success && result.dataUrl) {
+        window.__pdfExporterPendingDownload = {
+          dataUrl: result.dataUrl,
+          filename: result.filename,
+        };
+        return { success: true, filename: result.filename, hasDownload: true };
+      }
+      return result;
+    }
+    if (action === 'GET_READABLE_HTML') {
+      var htmlResult = await extractReadableContent();
+      return {
+        success: true,
+        htmlContent: htmlResult.element.outerHTML,
+        title: htmlResult.extractedTitle || params.pageTitle || document.title,
+      };
+    }
+    if (action === 'ping') {
+      return {
+        success: true,
+        version: window.__pdfExporterInjected || 'unknown',
+        contextValid: isExtensionContextValid(),
+      };
+    }
+    return { success: false, error: '未知操作: ' + action };
+  } catch (err) {
+    console.error('[PDF Exporter] __pdfExporterHandleAction 错误:', err);
+    return { success: false, error: (err && err.message) || String(err) || '未知错误' };
+  }
+};
+
+} // end of version guard block

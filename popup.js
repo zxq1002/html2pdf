@@ -176,106 +176,185 @@ function getExportConfig() {
 
 /**
  * 确保 content script 已注入到标签页
+ * 始终重新注入——content.js 内部有版本守卫，同版本不会重复注册监听器
  */
 async function ensureContentScriptInjected(tabId) {
-  try {
-    // 尝试发送 ping 消息检查 content script 是否存在
-    await chrome.tabs.sendMessage(tabId, { action: "ping" });
-  } catch (e) {
-    // Content script 未注入，需要手动注入
-    console.log("[PDF Exporter] 注入 content script...");
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: [
-        "lib/Readability.js",
-        "src/extractor.js",
-        "lib/html2pdf.bundle.min.js",
-        "content.js",
-      ],
-    });
-    // 等待脚本初始化
-    await new Promise((resolve) => setTimeout(resolve, 500));
+  console.log("[PDF Exporter] 注入 content script...");
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [
+      "lib/Readability.js",
+      "src/extractor.js",
+      "lib/html2pdf.bundle.min.js",
+      "content.js",
+    ],
+  });
+  // 等待脚本初始化
+  await new Promise((resolve) => setTimeout(resolve, 300));
+}
+
+/**
+ * 向 content script 发送指令
+ * 使用 chrome.scripting.executeScript 调用 window.__pdfExporterHandleAction
+ * 完全绕过 chrome.tabs.sendMessage，避免 iframe 中失效的旧脚本截获消息
+ */
+async function callContentScript(tabId, action, params) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (a, p) => window.__pdfExporterHandleAction(a, p),
+    args: [action, params],
+    // 不指定 world，默认在 isolated world 执行，与 content script 同一世界
+  });
+  if (!results || !results[0]) {
+    throw new Error('content script 未返回结果');
   }
+  return results[0].result;
 }
 
 /**
  * 使用浏览器原生打印功能生成矢量 PDF（文字可复制）
  */
 async function exportToPDFVector(tabId, config) {
-  // 通过 chrome.tabs.print() 或直接触发 window.print()
-  // 这里我们使用 chrome.scripting.executeScript 来执行打印
+  // 如果是阅读模式，先通过 content script 提取正文，再打印
+  if (config.mode === 'readable') {
+    await ensureContentScriptInjected(tabId);
 
+    const tabInfo = await chrome.tabs.get(tabId);
+    const response = await callContentScript(tabId, 'GET_READABLE_HTML', {
+      pageTitle: tabInfo.title,
+      pageUrl: tabInfo.url,
+    });
+
+    if (!response || !response.success) {
+      throw new Error(response?.error || '阅读模式内容提取失败');
+    }
+
+    // 将提取的正文内容放入隐藏 iframe 中打印，完全隔离页面上的扩展悬浮按钮
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (htmlContent, includeImages, forceLightMode, pageTitle) => {
+        return new Promise((resolve) => {
+          // 创建隐藏 iframe 承载打印内容
+          var iframe = document.createElement('iframe');
+          iframe.id = '__pdf_exporter_print_frame';
+          iframe.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:2147483646;background:white;';
+          document.body.appendChild(iframe);
+
+          var iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+          iframeDoc.open();
+          iframeDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + (pageTitle || '') + '</title></head><body></body></html>');
+          iframeDoc.close();
+
+          // 写入正文内容
+          iframeDoc.body.innerHTML = htmlContent;
+
+          // 添加打印样式到 iframe
+          var printStyles = iframeDoc.createElement('style');
+          printStyles.textContent = `
+            @media print {
+              @page { size: auto; margin: 15mm; }
+              * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+              html, body { background: white !important; ${forceLightMode ? 'color: black !important;' : ''} width: 100% !important; }
+              body { padding: 0; margin: 0; }
+              img { max-width: 100% !important; height: auto !important; page-break-inside: avoid !important; ${includeImages ? '' : 'display: none !important;'} }
+              .article-body p { margin-bottom: 1.2em; text-align: justify; }
+              a { color: inherit !important; }
+            }
+          `;
+          iframeDoc.head.appendChild(printStyles);
+
+          // 等待 iframe 渲染完成后触发打印
+          setTimeout(function() {
+            iframe.contentWindow.focus();
+            iframe.contentWindow.print();
+
+            // 打印完成后清理 iframe
+            setTimeout(function() {
+              iframe.remove();
+              resolve();
+            }, 500);
+          }, 500);
+        });
+      },
+      args: [response.htmlContent, config.includeImages, config.forceLightMode, tabInfo.title],
+    });
+
+    return;
+  }
+
+  // 原始模式：将页面内容复制到隐藏 iframe 中打印，隔离扩展悬浮元素
   await chrome.scripting.executeScript({
     target: { tabId },
     func: (includeImages, forceLightMode) => {
-      // 准备打印样式
-      const printStyles = document.createElement("style");
-      printStyles.textContent = `
-        @media print {
-          /* 重置页面设置 */
-          @page {
-            size: auto;
-            margin: 10mm;
+      return new Promise(function(resolve) {
+        // 创建隐藏 iframe
+        var iframe = document.createElement('iframe');
+        iframe.id = '__pdf_exporter_print_frame';
+        iframe.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:2147483646;background:white;';
+        document.body.appendChild(iframe);
+
+        var iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+        iframeDoc.open();
+
+        // 复制当前页面的 HTML 结构
+        var pageHtml = document.documentElement.outerHTML;
+        iframeDoc.write(pageHtml);
+        iframeDoc.close();
+
+        // 在 iframe 中移除浮动 UI 元素（使用 getComputedStyle 检测）
+        // iframe 是静态副本，扩展脚本不在其中运行，不会被反向覆盖
+        try {
+          var allElems = iframeDoc.querySelectorAll('*');
+          for (var i = allElems.length - 1; i >= 0; i--) {
+            var el = allElems[i];
+            var tag = el.tagName;
+            if (tag === 'BODY' || tag === 'HTML' || tag === 'HEAD') continue;
+            // 跳过页面主要内容区域
+            if (el.closest('article, main, [role="main"], .article, .post, .content, .entry-content')) continue;
+
+            var cs = getComputedStyle(el);
+            var pos = cs.position;
+            if (pos !== 'fixed' && pos !== 'sticky') continue;
+
+            var zi = parseInt(cs.zIndex, 10);
+            if (pos === 'fixed' && (!isNaN(zi) ? zi >= 500 : true)) {
+              el.remove();
+            } else if (pos === 'sticky' && !isNaN(zi) && zi >= 9990) {
+              el.remove();
+            }
           }
+        } catch(e) {}
 
-          ${forceLightMode ? `
-          :root { color-scheme: light !important; }
-          ` : ''}
-
-          * {
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
+        // 添加打印样式
+        var printStyles = iframeDoc.createElement('style');
+        printStyles.textContent = `
+          @media print {
+            @page { size: auto; margin: 10mm; }
+            ${forceLightMode ? ':root { color-scheme: light !important; }' : ''}
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+            html, body { width: 100% !important; height: auto !important; overflow: visible !important; background: white !important; ${forceLightMode ? 'color: black !important;' : ''} }
+            body { font-size: 12pt !important; line-height: 1.5 !important; }
+            div, section, article, main, p, ul, ol, li, table, figure { break-inside: avoid !important; page-break-inside: avoid !important; }
+            img { max-width: 100% !important; height: auto !important; page-break-inside: avoid !important; ${includeImages ? '' : 'display: none !important;'} }
+            nav, header, footer, aside, .ad, .ads, .advertisement,
+            .social-share, .comments, [role="navigation"],
+            [role="banner"], [role="complementary"],
+            script, style, noscript, iframe { display: none !important; }
           }
+        `;
+        iframeDoc.head.appendChild(printStyles);
 
-          html, body {
-            width: 100% !important;
-            height: auto !important;
-            overflow: visible !important;
-            background: white !important;
-            ${forceLightMode ? 'color: black !important;' : ''}
-          }
+        // 等待渲染后打印
+        setTimeout(function() {
+          iframe.contentWindow.focus();
+          iframe.contentWindow.print();
 
-          body {
-            font-size: 12pt !important;
-            line-height: 1.5 !important;
-          }
-
-          /* 确保内容不被截断 */
-          div, section, article, main, p, ul, ol, li, table, figure {
-            break-inside: avoid !important;
-            page-break-inside: avoid !important;
-          }
-
-          /* 图片处理 */
-          img {
-            max-width: 100% !important;
-            height: auto !important;
-            page-break-inside: avoid !important;
-            ${includeImages ? "" : "display: none !important;"}
-          }
-
-          /* 隐藏不需要打印的元素 */
-          nav, header, footer, aside, .ad, .ads, .advertisement,
-          .social-share, .comments, [role="navigation"],
-          [role="banner"], [role="complementary"],
-          script, style, noscript, iframe {
-            display: none !important;
-          }
-        }
-      `;
-      document.head.appendChild(printStyles);
-
-      // 滚动到页面顶部确保完整渲染
-      window.scrollTo(0, 0);
-
-      // 等待一下确保渲染完成
-      setTimeout(() => {
-        // 触发打印
-        window.print();
-
-        // 清理
-        setTimeout(() => printStyles.remove(), 1000);
-      }, 500);
+          setTimeout(function() {
+            iframe.remove();
+            resolve();
+          }, 500);
+        }, 800);
+      });
     },
     args: [config.includeImages, config.forceLightMode],
   });
@@ -332,8 +411,7 @@ async function exportToPDF() {
       const action =
         config.mode === "readable" ? "EXTRACT_CONTENT" : "exportPDF";
 
-      const response = await chrome.tabs.sendMessage(tab.id, {
-        action: action,
+      const response = await callContentScript(tab.id, action, {
         config: config,
         pageTitle: tab.title,
         pageUrl: tab.url,
@@ -343,15 +421,32 @@ async function exportToPDF() {
         throw new Error(response?.error || "导出失败");
       }
 
-      updateProgress(80, "正在生成 PDF 文件...");
+      // 如果有待下载的 PDF，从 content script 中取出并触发下载
+      if (response.hasDownload) {
+        updateProgress(90, "正在保存文件...");
 
-      // 下载生成的 PDF
-      const downloadId = await chrome.downloads.download({
-        url: response.dataUrl,
-        filename: response.filename,
-        saveAs: true, // 提示用户选择保存位置
-      });
+        const downloadResults = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const data = window.__pdfExporterPendingDownload;
+            delete window.__pdfExporterPendingDownload;
+            return data;
+          },
+        });
 
+        const downloadData = downloadResults?.[0]?.result;
+        if (downloadData && downloadData.dataUrl) {
+          await chrome.downloads.download({
+            url: downloadData.dataUrl,
+            filename: downloadData.filename,
+            saveAs: true,
+          });
+        } else {
+          throw new Error("无法获取 PDF 数据");
+        }
+      }
+
+      updateProgress(100, "导出完成！");
       setUIState(STATE.SUCCESS, "导出完成！");
 
       // 延迟关闭弹窗
