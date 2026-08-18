@@ -7,7 +7,6 @@ const exportBtn = document.getElementById("exportBtn");
 const progress = document.getElementById("progress");
 const progressFill = progress.querySelector(".progress-fill");
 const progressText = progress.querySelector(".progress-text");
-const errorDiv = document.getElementById("error");
 const statusToast = document.getElementById("statusToast");
 
 // UI 状态枚举
@@ -23,7 +22,6 @@ const DEFAULT_SETTINGS = {
   extractContent: false,
   exportFormat: "vector",
   includeImages: true,
-  includeLinks: true,
   forceLightMode: true,
   fontSize: 16,
   margin: 15,
@@ -107,7 +105,6 @@ async function loadSettings() {
     if (formatRadio) formatRadio.checked = true;
 
     document.getElementById("includeImages").checked = settings.includeImages;
-    document.getElementById("includeLinks").checked = settings.includeLinks;
     document.getElementById("forceLightMode").checked = settings.forceLightMode;
     document.getElementById("fontSize").value = settings.fontSize;
     document.getElementById("margin").value = settings.margin;
@@ -133,7 +130,6 @@ async function saveSettings() {
       exportFormat: document.querySelector('input[name="exportFormat"]:checked')
         .value,
       includeImages: document.getElementById("includeImages").checked,
-      includeLinks: document.getElementById("includeLinks").checked,
       forceLightMode: document.getElementById("forceLightMode").checked,
       fontSize: parseInt(document.getElementById("fontSize").value, 10),
       margin: parseInt(document.getElementById("margin").value, 10),
@@ -155,7 +151,6 @@ function getExportConfig() {
     'input[name="exportFormat"]:checked',
   ).value;
   const includeImages = document.getElementById("includeImages").checked;
-  const includeLinks = document.getElementById("includeLinks").checked;
   const forceLightMode = document.getElementById("forceLightMode").checked;
   const fontSize = parseInt(document.getElementById("fontSize").value, 10);
   const margin = parseInt(document.getElementById("margin").value, 10);
@@ -165,7 +160,6 @@ function getExportConfig() {
     mode: isReadable ? "readable" : "original",
     format, // 'vector' 或 'image'
     includeImages,
-    includeLinks,
     forceLightMode,
     fontSize,
     margin,
@@ -176,7 +170,9 @@ function getExportConfig() {
 
 /**
  * 确保 content script 已注入到标签页
- * 始终重新注入——content.js 内部有版本守卫，同版本不会重复注册监听器
+ * - 按需注入（manifest 不再声明 content_scripts），仅在用户点击导出时执行
+ * - 不注入 html2pdf（约 900KB），由 content.js 在需要图片 PDF 时懒加载
+ * - 用 ping 探测替代固定等待
  */
 async function ensureContentScriptInjected(tabId) {
   console.log("[PDF Exporter] 注入 content script...");
@@ -185,12 +181,20 @@ async function ensureContentScriptInjected(tabId) {
     files: [
       "lib/Readability.js",
       "src/extractor.js",
-      "lib/html2pdf.bundle.min.js",
       "content.js",
     ],
   });
-  // 等待脚本初始化
-  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  // ping 探测等待初始化完成，最多 2s
+  for (let i = 0; i < 10; i++) {
+    try {
+      const res = await callContentScript(tabId, "ping");
+      if (res && res.success && res.contextValid) return;
+    } catch (e) {
+      // 尚未就绪，继续等待
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 /**
@@ -334,8 +338,10 @@ async function exportToPDFVector(tabId, config) {
             * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
             html, body { width: 100% !important; height: auto !important; overflow: visible !important; background: white !important; ${forceLightMode ? 'color: black !important;' : ''} }
             body { font-size: 12pt !important; line-height: 1.5 !important; }
-            div, section, article, main, p, ul, ol, li, table, figure { break-inside: avoid !important; page-break-inside: avoid !important; }
-            img { max-width: 100% !important; height: auto !important; page-break-inside: avoid !important; ${includeImages ? '' : 'display: none !important;'} }
+            /* 只对小型不可分割元素禁止分页，避免长块元素导致大片空白或截断 */
+            img, figure, blockquote, pre, tr { break-inside: avoid; page-break-inside: avoid; }
+            h1, h2, h3, h4, h5, h6 { break-after: avoid; page-break-after: avoid; }
+            img { max-width: 100% !important; height: auto !important; ${includeImages ? '' : 'display: none !important;'} }
             nav, header, footer, aside, .ad, .ads, .advertisement,
             .social-share, .comments, [role="navigation"],
             [role="banner"], [role="complementary"],
@@ -405,7 +411,9 @@ async function exportToPDF() {
       updateProgress(20, "正在注入脚本...");
       await ensureContentScriptInjected(tab.id);
 
-      // 向 content script 发送消息执行导出
+      // 向 content script 发送指令执行导出
+      // content script 内部直接通过 blob URL 触发下载，
+      // 避免大体积 base64 在 executeScript 通道中往返
       updateProgress(40, "正在捕获页面内容...");
 
       const action =
@@ -419,31 +427,6 @@ async function exportToPDF() {
 
       if (!response || !response.success) {
         throw new Error(response?.error || "导出失败");
-      }
-
-      // 如果有待下载的 PDF，从 content script 中取出并触发下载
-      if (response.hasDownload) {
-        updateProgress(90, "正在保存文件...");
-
-        const downloadResults = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            const data = window.__pdfExporterPendingDownload;
-            delete window.__pdfExporterPendingDownload;
-            return data;
-          },
-        });
-
-        const downloadData = downloadResults?.[0]?.result;
-        if (downloadData && downloadData.dataUrl) {
-          await chrome.downloads.download({
-            url: downloadData.dataUrl,
-            filename: downloadData.filename,
-            saveAs: true,
-          });
-        } else {
-          throw new Error("无法获取 PDF 数据");
-        }
       }
 
       updateProgress(100, "导出完成！");

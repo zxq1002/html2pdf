@@ -16,7 +16,7 @@ function isExtensionContextValid() {
 }
 
 // 内容脚本版本号 —— 每次修改 content.js 后必须更新！
-var CONTENT_SCRIPT_VERSION = '2024-04-24-v4';
+var CONTENT_SCRIPT_VERSION = '2026-08-19-v5';
 
 // 清理旧版本：移除旧的事件监听器和全局状态
 if (typeof window.__pdfExporterCleanup === 'function') {
@@ -42,58 +42,11 @@ function safeSendResponse(sendResponse, data) {
   }
 }
 
-// 定义消息监听器（命名函数，便于移除）
-function pdfExporterMessageListener(request, sender, sendResponse) {
-  // 检查扩展上下文是否有效——如果无效则移除自身并忽略消息
-  if (!isExtensionContextValid()) {
-    console.warn('[PDF Exporter] 扩展上下文已失效，移除监听器');
-    chrome.runtime.onMessage.removeListener(pdfExporterMessageListener);
-    return false; // 不处理，让 popup 端超时后重新注入
-  }
-
-  // 只处理主框架的消息，忽略 iframe（避免广告/评论 iframe 干扰消息通道）
-  if (window.self !== window.top) {
-    return false;
-  }
-
-  if (request.action === "exportPDF") {
-    handleExportPDF(request, sendResponse).catch(function(err) {
-      console.error('[PDF Exporter] 未捕获的导出错误:', err);
-      safeSendResponse(sendResponse, { success: false, error: String(err && err.message) || String(err) || '未知错误' });
-    });
-    return true;
-  }
-  if (request.action === "EXTRACT_CONTENT") {
-    handleExportPDF({ config: { mode: 'readable' }, pageTitle: request.pageTitle, pageUrl: request.pageUrl }, sendResponse).catch(function(err) {
-      console.error('[PDF Exporter] 未捕获的提取错误:', err);
-      safeSendResponse(sendResponse, { success: false, error: String(err && err.message) || String(err) || '未知错误' });
-    });
-    return true;
-  }
-  if (request.action === "GET_READABLE_HTML") {
-    handleGetReadableHTML(request, sendResponse).catch(function(err) {
-      console.error('[PDF Exporter] 未捕获的 HTML 提取错误:', err);
-      safeSendResponse(sendResponse, { success: false, error: String(err && err.message) || String(err) || '未知错误' });
-    });
-    return true;
-  }
-  if (request.action === "ping") {
-    // ping 响应中包含上下文有效性信息，让 popup 判断是否需要重新注入
-    safeSendResponse(sendResponse, {
-      success: true,
-      version: CONTENT_SCRIPT_VERSION,
-      contextValid: isExtensionContextValid()
-    });
-    return false;
-  }
-}
-
-// 注册监听器
-chrome.runtime.onMessage.addListener(pdfExporterMessageListener);
+// 注：popup 统一通过 chrome.scripting.executeScript 调用 window.__pdfExporterHandleAction，
+// 不再注册 chrome.runtime.onMessage 监听器（避免 iframe 中旧脚本截获消息）
 
 // 保存清理函数和版本号
 window.__pdfExporterCleanup = function() {
-  chrome.runtime.onMessage.removeListener(pdfExporterMessageListener);
   delete window.__pdfExporterInjected;
   delete window.__extractorInjected;
   if (typeof window.extract !== 'undefined') delete window.extract;
@@ -154,7 +107,6 @@ async function handleExportPDF(request, sendResponse) {
 
     var pdfResult = await generatePDF(contentElement, {
       includeImages: config.includeImages,
-      includeLinks: config.includeLinks,
       forceLightMode: config.forceLightMode,
       fontSize: config.fontSize,
       margin: config.margin,
@@ -169,7 +121,7 @@ async function handleExportPDF(request, sendResponse) {
 
     response = {
       success: true,
-      dataUrl: pdfResult.dataUrl,
+      blob: pdfResult.blob,
       filename: pdfResult.filename,
     };
   } catch (error) {
@@ -184,32 +136,6 @@ async function handleExportPDF(request, sendResponse) {
     safeSendResponse(sendResponse, response);
   }
   return response;
-}
-
-/**
- * 处理阅读模式 HTML 提取请求（供矢量 PDF 打印使用）
- */
-async function handleGetReadableHTML(request, sendResponse) {
-  try {
-    var pageTitle = request.pageTitle;
-    var pageUrl = request.pageUrl;
-
-    console.log("[PDF Exporter] 提取阅读模式 HTML:", pageUrl);
-
-    var result = await extractReadableContent();
-
-    safeSendResponse(sendResponse, {
-      success: true,
-      htmlContent: result.element.outerHTML,
-      title: result.extractedTitle || pageTitle,
-    });
-  } catch (error) {
-    console.error("[PDF Exporter] 提取 HTML 失败:", error);
-    safeSendResponse(sendResponse, {
-      success: false,
-      error: (error && error.message) || String(error) || "未知错误",
-    });
-  }
 }
 
 /**
@@ -436,15 +362,17 @@ async function extractReadableContent() {
       });
 
       // Readability 提取
+      // 注意：Readability 会就地修改传入的 document，绝不能传活的 document，
+      // 否则会破坏用户正在浏览的页面，必须始终传入克隆副本
       try {
         article = extractFn(markedClone);
       } catch(e) {
         console.warn('[PDF Exporter] Readability 提取失败:', e);
-        article = extractFn(document);
+        article = extractFn(document.cloneNode(true));
       }
 
       if (!article || !article.content || article.content.trim().length < 50) {
-        article = extractFn(document);
+        article = extractFn(document.cloneNode(true));
       }
     }
 
@@ -466,9 +394,17 @@ async function extractReadableContent() {
       container.appendChild(authorP);
     }
 
+    // 来源信息：使用 DOM API 构造，避免将 location.href 拼进 innerHTML（防 XSS）
     var sourceP = document.createElement("p");
-    sourceP.innerHTML = "来源: <a href=\"" + window.location.href + "\" style=\"color: #3498db; text-decoration: none;\">" + window.location.hostname + "</a>";
     sourceP.style.cssText = "font-size: 13px; color: #999; margin-bottom: 35px;";
+    sourceP.appendChild(document.createTextNode("来源: "));
+    var sourceLink = document.createElement("a");
+    // 只允许 http(s) 协议，防止 javascript: 等危险协议进入 PDF
+    var href = window.location.href;
+    sourceLink.href = /^https?:/i.test(href) ? href : "#";
+    sourceLink.style.cssText = "color: #3498db; text-decoration: none;";
+    sourceLink.textContent = window.location.hostname;
+    sourceP.appendChild(sourceLink);
     container.appendChild(sourceP);
 
     // 正文内容净化
@@ -1094,11 +1030,10 @@ async function generatePDF(element, options) {
 
     console.log("[PDF Exporter] PDF 大小:", (pdfBlob.size / 1024).toFixed(2), "KB");
 
-    var dataUrl = await blobToDataURL(pdfBlob);
     iframe.remove();
     sendProgress(100, "生成完成！");
 
-    return { filename: filename, dataUrl: dataUrl, blob: pdfBlob };
+    return { filename: filename, blob: pdfBlob };
   } catch (error) {
     console.error("[PDF Exporter] 错误:", error);
     if (iframe.parentNode) iframe.remove();
@@ -1107,7 +1042,7 @@ async function generatePDF(element, options) {
 }
 
 /**
- * Blob 转 Data URL
+ * Blob 转 Data URL（仅用于图片加载失败时的降级修复）
  */
 function blobToDataURL(blob) {
   return new Promise(function(resolve, reject) {
@@ -1116,6 +1051,24 @@ function blobToDataURL(blob) {
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+}
+
+/**
+ * 在页面上下文中直接触发下载（blob URL），
+ * 避免大体积 base64 数据在 executeScript 通道中往返
+ */
+function triggerDownload(blob, filename) {
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 延迟释放，确保下载已启动
+  setTimeout(function() {
+    URL.revokeObjectURL(url);
+  }, 60000);
 }
 
 /**
@@ -1150,7 +1103,7 @@ function loadScript(src) {
  * 完全绕过 chrome.tabs.sendMessage，避免 iframe 中失效的旧脚本截获消息导致通道断开
  *
  * 注意：exportPDF 操作直接在 content script 中触发下载，
- * 不返回 dataUrl（大数据无法通过 executeScript 结果序列化传回）
+ * 不返回二进制数据（大数据无法通过 executeScript 结果序列化传回）
  */
 window.__pdfExporterHandleAction = async function(action, params) {
   params = params || {};
@@ -1161,14 +1114,9 @@ window.__pdfExporterHandleAction = async function(action, params) {
         pageTitle: params.pageTitle || document.title,
         pageUrl: params.pageUrl || location.href,
       });
-      if (result.success && result.dataUrl) {
-        // 把下载信息暂存到 window 上，供 popup 通过 executeScript 取回
-        // dataUrl 太大无法通过 executeScript 的返回值直接序列化传递
-        window.__pdfExporterPendingDownload = {
-          dataUrl: result.dataUrl,
-          filename: result.filename,
-        };
-        return { success: true, filename: result.filename, hasDownload: true };
+      if (result.success && result.blob) {
+        triggerDownload(result.blob, result.filename);
+        return { success: true, filename: result.filename };
       }
       return result;
     }
@@ -1178,12 +1126,9 @@ window.__pdfExporterHandleAction = async function(action, params) {
         pageTitle: params.pageTitle || document.title,
         pageUrl: params.pageUrl || location.href,
       });
-      if (result.success && result.dataUrl) {
-        window.__pdfExporterPendingDownload = {
-          dataUrl: result.dataUrl,
-          filename: result.filename,
-        };
-        return { success: true, filename: result.filename, hasDownload: true };
+      if (result.success && result.blob) {
+        triggerDownload(result.blob, result.filename);
+        return { success: true, filename: result.filename };
       }
       return result;
     }
@@ -1208,5 +1153,16 @@ window.__pdfExporterHandleAction = async function(action, params) {
     return { success: false, error: (err && err.message) || String(err) || '未知错误' };
   }
 };
+
+// 暴露内部函数到 window（供单元测试访问，isolated world 中无安全风险）
+try {
+  window.extractReadableContent = extractReadableContent;
+  window.generatePDF = generatePDF;
+  window.cloneDocumentForExport = cloneDocumentForExport;
+  window.cleanExtractedContent = cleanExtractedContent;
+  window.normalizeContent = normalizeContent;
+} catch (e) {
+  // 测试环境下函数可能被字符串替换，忽略
+}
 
 } // end of version guard block

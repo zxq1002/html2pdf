@@ -8,6 +8,7 @@ const path = require('path');
 // Mock chrome API
 global.chrome = {
   runtime: {
+    id: 'test-extension-id',
     getURL: jest.fn(url => url),
     sendMessage: jest.fn().mockReturnValue(Promise.resolve()),
     onMessage: {

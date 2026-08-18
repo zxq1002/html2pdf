@@ -439,22 +439,6 @@ footer {
   color: #666;
 }
 
-/* Error */
-.error {
-  margin-top: 12px;
-  padding: 10px 12px;
-  background: #fde7e9;
-  border: 1px solid #f5c6cb;
-  border-radius: 6px;
-  color: #721c24;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.error.hidden {
-  display: none;
-}
-
 /* Status Toast */
 .status-toast {
   position: fixed;

@@ -1,14 +1,10 @@
 {
   "name": "html2pdf",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "将当前网页导出为可复制的 PDF 文件，保持文字可选、链接可点击。",
-  "main": "background.js",
-  "directories": {
-    "doc": "docs",
-    "lib": "lib"
-  },
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "pack": "zip -r web-extension-html2pdf.zip manifest.json popup.html popup.js popup.css content.js src lib icons README.md LICENSE -x '*.DS_Store'"
   },
   "repository": {
     "type": "git",
@@ -17,13 +13,13 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/zxq1002/html2pdf/issues"
   },
   "homepage": "https://github.com/zxq1002/html2pdf#readme",
   "devDependencies": {
     "jest": "^30.3.0",
-    "jest-environment-jsdom": "^30.3.0"
+    "jest-environment-jsdom": "^30.3.0",
+    "jsdom": "^26.1.0"
   }
 }
