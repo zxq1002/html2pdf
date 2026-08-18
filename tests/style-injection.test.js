@@ -66,6 +66,10 @@ describe('Style Injection and Filename Optimization', () => {
       byline: 'Author Name'
     });
 
+    // 先加载共享清理模块（content.js 依赖 window.__pdfCleaner）
+    const cleanerJs = fs.readFileSync(path.resolve(__dirname, '../src/cleaner.js'), 'utf8');
+    window.eval(cleanerJs);
+
     // Load content.js logic
     // We'll read the file and wrap it to make functions accessible if needed, 
     // or just rely on them being defined on window in the JSDOM context.

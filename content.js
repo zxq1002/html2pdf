@@ -16,7 +16,7 @@ function isExtensionContextValid() {
 }
 
 // 内容脚本版本号 —— 每次修改 content.js 后必须更新！
-var CONTENT_SCRIPT_VERSION = '2026-08-19-v5';
+var CONTENT_SCRIPT_VERSION = '2026-08-19-v6';
 
 // 清理旧版本：移除旧的事件监听器和全局状态
 if (typeof window.__pdfExporterCleanup === 'function') {
@@ -283,74 +283,18 @@ async function extractReadableContent() {
       var markedClone = document.cloneNode(true);
       markedClone.querySelectorAll('[data-pdf-hidden="true"]').forEach(function(el) { el.remove(); });
 
-      // 3. 全局噪声清理（Readability 路径）
-      var noiseSelectors = [
-        'nav', 'footer', 'aside', 'header',
-        '[role="navigation"]', '[role="complementary"]', '[role="banner"]',
-        '[role="contentinfo"]', '[role="search"]', '[role="alert"]',
-        '.nav', '.navigation', '.navbar', '.breadcrumb', '.breadcrumbs',
-        '.aside', '.sidebar', '.side-bar', '.side_panel',
-        '.footer', '.header', '.topbar', '.top-bar',
-        '.ad', '.ads', '.advertisement', '.ad-container', '.ad-wrapper',
-        '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
-        '.social-share', '.share-bar', '.share-btn', '.toolbar', '.float-toolbar',
-        '.back-top', '.back-to-top', '.go-top',
-        '.related-news', '.recommend-articles', '.hot-topics',
-        '.recommend', '.related', '.trending',
-        '[class*="recommend"]', '[class*="related"]',
-        '.comments-container', '.comments', '#comments', '.comment-list',
-        '[class*="comment"]',
-        '.mask', '.overlay', '.modal', '.dialog', '.popup', '.layer',
-        '.float-layer', '.float-bar', '.fixed-bar', '.sticky-bar',
-        '[class*="popup"]', '[class*="modal"]', '[class*="dialog"]',
-        '[class*="float-"]', '[class*="sticky-"]',
-        '.user-action', '.login-prompt', '.login-panel',
-        '.user-panel', '.auth-panel',
-        '.copyright', '.site-info', '.footer-info',
-        'script', 'style', 'noscript', 'iframe',
-        '[class*="share"]', '[class*="social"]',
-        '[class*="widget"]', '[class*="banner"]',
-        '[class*="skeleton"]', '[class*="placeholder"]', '[class*="loading"]',
-        '.article-widget-head', '.widget-operation-skeleton',
-        '.com-author-name', '.audio-player-skeleton',
-        '[class*="_content-side"]', '[class*="_operation-bar"]',
-        '[class*="_topic-nav"]', '[class*="_sub-nav"]',
-        '[class*="_layout-footer"]', '[class*="_nav-list"]',
-        '[class*="_article-cover"]', '[class*="_audio-wrap"]',
-        '[class*="sidebar"]', '[class*="Sidebar"]',
-        '[class*="side-bar"]', '[class*="SideBar"]',
-        '[class*="aside"]', '[class*="Aside"]',
-        '[class*="operation-bar"]', '[class*="OperationBar"]',
-        '[class*="action-bar"]', '[class*="ActionBar"]',
-        'button', 'input', 'textarea', 'select',
-      ];
-
-      noiseSelectors.forEach(function(selector) {
-        try {
-          markedClone.querySelectorAll(selector).forEach(function(el) {
-            var text = el.textContent.trim();
-            if (text.length > 300) {
-              var links = el.querySelectorAll('a');
-              var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
-              var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
-              if (linkDensity < 0.25) return;
-            }
-            el.remove();
-          });
-        } catch(e) {}
-      });
+      // 3. 全局噪声清理（Readability 路径，统一逻辑见 src/cleaner.js）
+      // 此处作用于整页克隆，保留阈值更宽松：文本>300 且链接密度<0.25 才保留
+      var cleaner = window.__pdfCleaner;
+      cleaner.removeNoise(markedClone, cleaner.NOISE_SELECTORS, { keepTextLen: 300, keepMaxDensity: 0.25 });
 
       // 链接密度清理
-      markedClone.querySelectorAll('div, section, ul, aside').forEach(function(el) {
-        if (el === markedClone.body || el === markedClone.documentElement) return;
-        var text = el.textContent.trim();
-        if (text.length < 20) { el.remove(); return; }
-        var links = el.querySelectorAll('a');
-        if (links.length === 0) return;
-        var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
-        var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
-        if (linkDensity > 0.6 && text.length < 2000) { el.remove(); return; }
-        if (links.length > 10 && text.length < 500) { el.remove(); return; }
+      cleaner.cleanByLinkDensity(markedClone, {
+        selector: 'div, section, ul, aside',
+        minText: 20,
+        highDensityMaxText: 2000,
+        manyLinks: 10,
+        manyLinksMaxText: 500,
       });
 
       // 处理延迟加载图片
@@ -419,69 +363,21 @@ async function extractReadableContent() {
       console.warn('[PDF Exporter] normalizeContent 出错，使用原始内容:', normErr);
     }
 
-    // 4. 对提取后的内容进行二次深度净化（基于选择器）
-    var postCleanSelectors = [
-      '[class*="share"]', '[id*="share"]',
-      '[class*="social"]', '[id*="social"]',
-      '[class*="recommend"]', '[id*="recommend"]',
-      '[class*="related"]', '[id*="related"]',
-      '[class*="ad-"]', '[class*="ads-"]',
-      '[class*="advert"]', '[id*="ad-"]', '[id*="ads-"]',
-      '[class*="nav"]', '[id*="nav"]',
-      '[class*="breadcrumb"]', '[id*="breadcrumb"]',
-      '[class*="sidebar"]', '[id*="sidebar"]',
-      '[class*="side-bar"]', '[class*="side_panel"]',
-      '[class*="comment"]', '[id*="comment"]',
-      '[class*="popup"]', '[class*="modal"]',
-      '[class*="dialog"]', '[class*="overlay"]',
-      '[class*="float-"]', '[class*="sticky-"]',
-      '[class*="fixed-"]',
-      '[class*="toolbar"]', '[class*="tool-bar"]',
-      '[class*="action-bar"]', '[class*="actionbar"]',
-      '[class*="copyright"]', '[class*="footer"]',
-      '[id*="footer"]',
-      '[class*="login"]', '[class*="signup"]',
-      '[class*="register"]', '[class*="auth-"]',
-      '[class*="widget"]', '[id*="widget"]',
-      '[class*="banner"]', '[id*="banner"]',
-      'button', 'script', 'style', 'noscript', 'iframe',
-      'svg.icon', 'svg[class*="icon"]',
-    ];
-
-    postCleanSelectors.forEach(function(selector) {
-      try {
-        contentDiv.querySelectorAll(selector).forEach(function(el) {
-          var text = el.textContent.trim();
-          var links = el.querySelectorAll('a');
-          var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
-          var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
-          if (text.length > 200 && linkDensity < 0.3) {
-            return;
-          }
-          el.remove();
-        });
-      } catch(e) {}
-    });
+    // 4. 对提取后的内容进行二次深度净化（统一逻辑见 src/cleaner.js）
+    var cleaner = window.__pdfCleaner;
+    cleaner.removeNoise(contentDiv, cleaner.NOISE_SELECTORS);
 
     // 4b. 链接密度清理
-    var postBlockElements = contentDiv.querySelectorAll('div, section, aside, ul');
-    postBlockElements.forEach(function(el) {
-      var text = el.textContent.trim();
-      if (text.length < 15) { el.remove(); return; }
-      var links = el.querySelectorAll('a');
-      if (links.length === 0) return;
-      var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
-      var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
-      if (linkDensity > 0.6 && text.length < 1500) { el.remove(); return; }
-      if (links.length > 8 && text.length < 300) { el.remove(); return; }
+    cleaner.cleanByLinkDensity(contentDiv, {
+      selector: 'div, section, aside, ul',
+      minText: 15,
+      highDensityMaxText: 1500,
+      manyLinks: 8,
+      manyLinksMaxText: 300,
     });
 
     // 4c. 移除空元素
-    contentDiv.querySelectorAll('div, span').forEach(function(el) {
-      if (el.children.length === 0 && el.textContent.trim() === '' && !el.querySelector('img')) {
-        el.remove();
-      }
-    });
+    cleaner.removeEmpty(contentDiv, 'div, span');
 
     // 5. 强制重置所有元素的布局样式
     contentDiv.querySelectorAll("*").forEach(function(el) {
@@ -581,68 +477,11 @@ function cleanExtractedContent(html) {
   var doc = parser.parseFromString(html, 'text/html');
   var body = doc.body;
 
-  var innerNoiseSelectors = [
-    '.com-author-name', '.author-name', '.author-info',
-    '.head-detail', '.article-widget-head',
-    '.audio-player-skeleton', '.audio-wrap', '[class*="audio"]',
-    '[class*="operation-bar"]', '[class*="OperationBar"]',
-    '[class*="action-bar"]', '[class*="ActionBar"]',
-    '[class*="share"]', '[id*="share"]',
-    '[class*="recommend"]', '[id*="recommend"]',
-    '[class*="related"]', '[id*="related"]',
-    '[class*="comment"]', '[id*="comment"]',
-    '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
-    '[class*="popup"]', '[class*="modal"]', '[class*="dialog"]',
-    '[class*="overlay"]', '[class*="float-"]', '[class*="sticky-"]',
-    '[class*="skeleton"]', '[class*="placeholder"]',
-    'button', 'input[type="button"]', 'input[type="submit"]',
-  ];
-
-  innerNoiseSelectors.forEach(function(selector) {
-    try {
-      body.querySelectorAll(selector).forEach(function(el) {
-        var text = el.textContent.trim();
-        var links = el.querySelectorAll('a');
-        var linkText = Array.from(links).map(function(a) { return a.textContent.trim(); }).join('');
-        var linkDensity = text.length > 0 ? linkText.length / text.length : 0;
-        if (text.length > 200 && linkDensity < 0.3) return;
-        el.remove();
-      });
-    } catch(e) {}
-  });
-
-  var noisePatterns = [
-    /^\s*作者[：:]\s*/i,
-    /^\s*来源[：:]\s*/i,
-    /^\s*原文链接[：:]\s*/i,
-    /^\s*本文字数[：:]\s*/i,
-    /^\s*阅读完需[：:]\s*/i,
-    /^\s*推荐阅读\s*$/i,
-    /^\s*相关推荐\s*$/i,
-    /^\s*热门文章\s*$/i,
-    /^\s*精选集\s*$/i,
-    /^\s*立即下载\s*$/i,
-    /^\s*大小[：:]\s*\d/i,
-    /^\s*时长[：:]\s*\d/i,
-    /^\s*\d+\.\d+M\s*$/i,
-    /^\s*\d+:\d+\s*$/i,
-  ];
-
-  body.querySelectorAll('p, div, span, li').forEach(function(el) {
-    var text = el.textContent.trim();
-    for (var i = 0; i < noisePatterns.length; i++) {
-      if (noisePatterns[i].test(text)) {
-        el.remove();
-        break;
-      }
-    }
-  });
-
-  body.querySelectorAll('p, div, span').forEach(function(el) {
-    if (el.children.length === 0 && el.textContent.trim() === '' && !el.querySelector('img')) {
-      el.remove();
-    }
-  });
+  // 统一清理逻辑见 src/cleaner.js
+  var cleaner = window.__pdfCleaner;
+  cleaner.removeNoise(body, cleaner.NOISE_SELECTORS);
+  cleaner.removeNoiseText(body, cleaner.NOISE_TEXT_PATTERNS);
+  cleaner.removeEmpty(body, 'p, div, span');
 
   return body.innerHTML;
 }
@@ -932,60 +771,40 @@ async function generatePDF(element, options) {
   var contentHeight = iframe.contentDocument.body.scrollHeight;
   var finalScale = scale || 2;
 
+  // 浏览器对 canvas 单边尺寸有硬性上限（Chrome 为 32767px），
+  // 超出会得到空白画布，导出前必须拦截
+  var MAX_CANVAS_DIM = 32767;
+  if (contentHeight > MAX_CANVAS_DIM) {
+    iframe.remove();
+    throw new Error(
+      '页面内容过长（' + contentHeight + 'px，超出图片 PDF ' + MAX_CANVAS_DIM +
+      'px 上限），请改用「矢量 PDF」格式或开启「提取正文」模式'
+    );
+  }
+
   if (contentHeight > 10000) {
-    finalScale = 1.0;
+    finalScale = Math.min(finalScale, 1.0);
     sendProgress(60, "检测到超长网页，已自动优化渲染性能...");
     console.log('[PDF Exporter] 检测到超长网页 (' + contentHeight + 'px)，将 scale 降至 ' + finalScale);
   } else if (contentHeight > 5000) {
-    finalScale = 1.5;
+    finalScale = Math.min(finalScale, 1.5);
     sendProgress(60, "检测到长网页，已自动优化渲染性能...");
     console.log('[PDF Exporter] 检测到长网页 (' + contentHeight + 'px)，将 scale 降至 ' + finalScale);
   }
 
-  var images = iframe.contentDocument.querySelectorAll("img");
+  // 进一步压低 scale，确保 canvas 总高度不超限
+  if (contentHeight * finalScale > MAX_CANVAS_DIM) {
+    finalScale = Math.max(MAX_CANVAS_DIM / contentHeight, 0.1);
+    console.log('[PDF Exporter] 画布高度将超限，scale 进一步降至 ' + finalScale.toFixed(3));
+  }
+
+  var images = Array.from(iframe.contentDocument.querySelectorAll("img"));
   sendProgress(50, "正在处理跨域图片...");
 
-  await Promise.all(
-    Array.from(images).map(function(img) {
-      return new Promise(async function(resolve) {
-        if (img.complete && img.naturalWidth > 0) { resolve(); return; }
-
-        var timeout = setTimeout(function() {
-          console.warn("[PDF Exporter] 图片加载超时:", img.src);
-          resolve();
-        }, 5000);
-
-        img.onload = function() { clearTimeout(timeout); resolve(); };
-
-        img.onerror = async function() {
-          clearTimeout(timeout);
-          if (img.src && !img.src.startsWith("data:") && !img.src.startsWith("blob:")) {
-            try {
-              var response = await fetch(img.src).catch(function() { return null; });
-              if (response && response.ok) {
-                var blob = await response.blob();
-                img.src = await blobToDataURL(blob);
-                img.onload = resolve;
-                img.onerror = resolve;
-                return;
-              }
-            } catch (e) {
-              console.warn("[PDF Exporter] 修复图片失败:", img.src);
-            }
-          }
-          resolve();
-        };
-
-        if (img.src) {
-          var currentSrc = img.src;
-          img.src = "";
-          img.src = currentSrc;
-        } else {
-          resolve();
-        }
-      });
-    })
-  );
+  // 限制并发，避免图片极多的页面同时发起几十个请求
+  await mapWithConcurrency(images, 8, function(img) {
+    return waitForImageLoad(img);
+  });
 
   var marginConfig = [15, 15, 15, 15];
   if (margin === 'narrow' || margin === 5) {
@@ -1038,6 +857,93 @@ async function generatePDF(element, options) {
     console.error("[PDF Exporter] 错误:", error);
     if (iframe.parentNode) iframe.remove();
     throw error;
+  }
+}
+
+/**
+ * 带并发上限的异步任务执行器
+ * @param {Array} items - 任务输入列表
+ * @param {number} limit - 最大并发数
+ * @param {Function} worker - 任务函数 (item, index) => Promise
+ * @returns {Promise<Array>} 与输入顺序一致的结果数组
+ */
+function mapWithConcurrency(items, limit, worker) {
+  var results = [];
+  var nextIndex = 0;
+  var runners = [];
+  var runnerCount = Math.min(limit, items.length);
+
+  for (var r = 0; r < runnerCount; r++) {
+    runners.push((function runNext() {
+      var i = nextIndex++;
+      if (i >= items.length) return Promise.resolve();
+      return Promise.resolve(worker(items[i], i)).then(function(res) {
+        results[i] = res;
+        return runNext();
+      });
+    })());
+  }
+
+  return Promise.all(runners).then(function() { return results; });
+}
+
+/**
+ * 等待单张图片加载完成（含 5s 超时与 fetch 降级修复）
+ */
+function waitForImageLoad(img) {
+  return new Promise(function(resolve) {
+    if (img.complete && img.naturalWidth > 0) { resolve(); return; }
+
+    var finished = false;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      img.onload = null;
+      img.onerror = null;
+      resolve();
+    }
+
+    var timeout = setTimeout(function() {
+      console.warn("[PDF Exporter] 图片加载超时:", img.src);
+      finish();
+    }, 5000);
+
+    img.onload = function() { clearTimeout(timeout); finish(); };
+    img.onerror = function() {
+      clearTimeout(timeout);
+      repairBrokenImage(img).then(finish, finish);
+    };
+
+    if (img.src) {
+      // 重置 src 强制重新加载（处理 iframe 复制后加载失败的情况）
+      var currentSrc = img.src;
+      img.src = "";
+      img.src = currentSrc;
+    } else {
+      finish();
+    }
+  });
+}
+
+/**
+ * 图片加载失败时，尝试直接 fetch 并转为 DataURL（绕开 CORS 限制）
+ */
+async function repairBrokenImage(img) {
+  if (!img.src || img.src.startsWith("data:") || img.src.startsWith("blob:")) return;
+  try {
+    var response = await fetch(img.src).catch(function() { return null; });
+    if (response && response.ok) {
+      var blob = await response.blob();
+      var dataUrl = await blobToDataURL(blob);
+      // 等待 DataURL 图片解码完成，避免截图时仍在加载
+      await new Promise(function(res) {
+        img.onload = res;
+        img.onerror = res;
+        img.src = dataUrl;
+      });
+    }
+  } catch (e) {
+    console.warn("[PDF Exporter] 修复图片失败:", img.src);
   }
 }
 

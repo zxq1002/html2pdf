@@ -181,6 +181,7 @@ async function ensureContentScriptInjected(tabId) {
     files: [
       "lib/Readability.js",
       "src/extractor.js",
+      "src/cleaner.js",
       "content.js",
     ],
   });

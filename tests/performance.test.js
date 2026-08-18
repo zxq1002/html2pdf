@@ -34,6 +34,10 @@ describe('Performance/Compression Configuration', () => {
   beforeAll(() => {
     // Read content.js
     contentJs = fs.readFileSync(path.resolve(__dirname, '../content.js'), 'utf8');
+
+    // 先加载共享清理模块（content.js 依赖 window.__pdfCleaner）
+    const cleanerJs = fs.readFileSync(path.resolve(__dirname, '../src/cleaner.js'), 'utf8');
+    eval(cleanerJs);
     
     // Polyfill window properties
     window.scrollTo = jest.fn();
@@ -123,6 +127,38 @@ describe('Performance/Compression Configuration', () => {
       }));
     }
     
+    // Restore
+    document.createElement = originalCreateElement;
+  });
+
+  test('generatePDF should reject when content exceeds canvas height limit', async () => {
+    const mockElement = document.createElement('div');
+
+    const originalCreateElement = document.createElement;
+    document.createElement = jest.fn(function(tag) {
+      const el = originalCreateElement.call(document, tag);
+      if (tag === 'iframe') {
+        Object.defineProperty(el, 'contentDocument', {
+          get: () => ({
+            open: jest.fn(),
+            write: jest.fn(),
+            close: jest.fn(),
+            body: {
+              scrollHeight: 40000, // 超过 32767 canvas 上限
+              innerHTML: ''
+            },
+            querySelectorAll: jest.fn().mockReturnValue([])
+          })
+        });
+      }
+      return el;
+    }).bind(document);
+
+    global.loadLibraries = jest.fn().mockResolvedValue();
+
+    await expect(global.generatePDF(mockElement, { pageTitle: 'Huge Page' }))
+      .rejects.toThrow(/超出/);
+
     // Restore
     document.createElement = originalCreateElement;
   });

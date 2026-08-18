@@ -66,7 +66,9 @@ manifest.json         # 扩展配置（按需注入，仅需 activeTab/scripting
 ├── popup.js          # 弹出面板逻辑（矢量打印流程在此编排）
 ├── popup.css         # 弹出面板样式
 ├── content.js        # 内容脚本（点击导出时按需注入）
-├── src/extractor.js  # Readability 封装（正文提取）
+├── src/
+│   ├── extractor.js  # Readability 封装（正文提取）
+│   └── cleaner.js    # 内容清理模块（噪声/链接密度/空元素，三处逻辑统一）
 └── lib/
     ├── html2pdf.bundle.min.js  # PDF 生成库（仅图片格式时懒加载）
     └── Readability.js          # Mozilla Readability
