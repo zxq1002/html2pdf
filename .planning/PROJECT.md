@@ -18,10 +18,10 @@
 - **持久化存储：** 保存用户的导出偏好。
 
 ## 代码组织 (Organization)
-- `manifest.json`: 定义权限（`activeTab`, `scripting`, `downloads`）和组件入口。
+- `manifest.json`: 定义权限（`activeTab`, `scripting`, `storage`）和组件入口。
 - `popup/`: 用户交互层（`popup.html`, `popup.js`, `popup.css`）。
-- `content.js`: 核心逻辑层，运行在网页上下文中，负责内容提取和 PDF 生成。
-- `background.js`: 服务层，协调下载任务和存储逻辑。
+- `content.js`: 核心逻辑层，运行在网页上下文中，负责导出编排与内容提取。
+- `src/`: 功能模块（`extractor.js` 正文提取、`cleaner.js` 内容清理、`pdf.js` PDF 生成）。
 - `lib/`: 存放预编译的第三方依赖。
 - `icons/`: 包含不同尺寸的图标资源。
 

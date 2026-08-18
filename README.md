@@ -68,7 +68,8 @@ manifest.json         # 扩展配置（按需注入，仅需 activeTab/scripting
 ├── content.js        # 内容脚本（点击导出时按需注入）
 ├── src/
 │   ├── extractor.js  # Readability 封装（正文提取）
-│   └── cleaner.js    # 内容清理模块（噪声/链接密度/空元素，三处逻辑统一）
+│   ├── cleaner.js    # 内容清理模块（噪声/链接密度/空元素，三处逻辑统一）
+│   └── pdf.js        # PDF 生成模块（DOM 克隆/渲染/图片修复/下载触发）
 └── lib/
     ├── html2pdf.bundle.min.js  # PDF 生成库（仅图片格式时懒加载）
     └── Readability.js          # Mozilla Readability

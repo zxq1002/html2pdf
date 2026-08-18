@@ -66,9 +66,11 @@ describe('Style Injection and Filename Optimization', () => {
       byline: 'Author Name'
     });
 
-    // 先加载共享清理模块（content.js 依赖 window.__pdfCleaner）
+    // 先加载共享清理模块与 PDF 生成模块（content.js 运行时依赖二者）
     const cleanerJs = fs.readFileSync(path.resolve(__dirname, '../src/cleaner.js'), 'utf8');
     window.eval(cleanerJs);
+    const pdfJs = fs.readFileSync(path.resolve(__dirname, '../src/pdf.js'), 'utf8');
+    window.eval(pdfJs);
 
     // Load content.js logic
     // We'll read the file and wrap it to make functions accessible if needed, 

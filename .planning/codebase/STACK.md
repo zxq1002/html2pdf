@@ -5,7 +5,7 @@
 ## 语言 (Languages)
 
 **主要语言：**
-- JavaScript (ES6+) - `background.js`, `content.js` 和 `popup.js` 中的核心扩展逻辑。
+- JavaScript (ES6+) - `content.js`、`src/*.js` 和 `popup.js` 中的核心扩展逻辑。
 - HTML5/CSS3 - `popup.html` 和 `popup.css` 中的弹出窗口 UI。
 
 **次要语言：**
@@ -37,7 +37,7 @@
 - `lib/html2pdf.bundle.min.js` - PDF 生成的必备库。
 
 **基础设施：**
-- Chrome 扩展 API - `tabs`, `scripting`, `downloads`, `storage` (local)。
+- Chrome 扩展 API - `tabs`, `scripting`, `storage` (local)。
 
 ## 配置 (Configuration)
 

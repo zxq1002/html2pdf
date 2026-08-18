@@ -30,10 +30,12 @@ global.html2pdf = jest.fn(() => html2pdfMock);
 
 describe('Performance/Compression Configuration', () => {
   let contentJs;
+  let pdfJs;
 
   beforeAll(() => {
-    // Read content.js
+    // Read source files
     contentJs = fs.readFileSync(path.resolve(__dirname, '../content.js'), 'utf8');
+    pdfJs = fs.readFileSync(path.resolve(__dirname, '../src/pdf.js'), 'utf8');
 
     // 先加载共享清理模块（content.js 依赖 window.__pdfCleaner）
     const cleanerJs = fs.readFileSync(path.resolve(__dirname, '../src/cleaner.js'), 'utf8');
@@ -45,18 +47,19 @@ describe('Performance/Compression Configuration', () => {
     // Mock blobToDataURL to be synchronous for testing ease
     global.blobToDataURL = jest.fn().mockResolvedValue('data:application/pdf;base64,dGVzdA==');
     
-    // Inject content.js logic
+    // Inject pdf.js + content.js logic
     try {
       // We need to bypass the injected check
       window.__pdfExporterInjected = false;
       
-      // Manually expose functions we need to test
-      const modifiedJs = contentJs
+      // Manually expose functions we need to test (now in src/pdf.js)
+      const modifiedPdfJs = pdfJs
         .replace('async function generatePDF', 'global.generatePDF = async function')
         .replace('function cloneDocumentForExport', 'global.cloneDocumentForExport = function');
-      eval(modifiedJs);
+      eval(modifiedPdfJs);
+      eval(contentJs);
     } catch (e) {
-      console.error('Error evaling content.js:', e);
+      console.error('Error evaling source files:', e);
     }
   });
 

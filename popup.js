@@ -171,7 +171,8 @@ function getExportConfig() {
 /**
  * 确保 content script 已注入到标签页
  * - 按需注入（manifest 不再声明 content_scripts），仅在用户点击导出时执行
- * - 不注入 html2pdf（约 900KB），由 content.js 在需要图片 PDF 时懒加载
+ * - 不注入 html2pdf（约 900KB），由 src/pdf.js 在需要图片 PDF 时懒加载
+ * - 注入顺序：Readability → extractor → cleaner → pdf → content
  * - 用 ping 探测替代固定等待
  */
 async function ensureContentScriptInjected(tabId) {
@@ -182,6 +183,7 @@ async function ensureContentScriptInjected(tabId) {
       "lib/Readability.js",
       "src/extractor.js",
       "src/cleaner.js",
+      "src/pdf.js",
       "content.js",
     ],
   });

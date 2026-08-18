@@ -5,7 +5,7 @@
 ## 命名模式 (Naming Patterns)
 
 **文件：**
-- 扩展文件：短横线命名法 (kebab-case)（如 `background.js`, `content.js`）。
+- 扩展文件：短横线命名法 (kebab-case)（如 `content.js`, `popup.js`）。
 - 脚本：蛇形命名法 (snake_case)（如 `generate_icons.py`）。
 
 **函数：**
