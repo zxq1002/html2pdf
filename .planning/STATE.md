@@ -43,7 +43,7 @@ progress:
     - [2026-08-19] 修复 Readability 回退路径直接传入活 document 导致用户页面被破坏的缺陷（改为传入克隆副本）。
     - [2026-08-19] 移除 manifest content_scripts 与 background.js，改为按需注入（activeTab），权限收敛；html2pdf 懒加载。
     - [2026-08-19] 图片 PDF 下载链路改为 content script 内 blob URL 直接触发，消除 base64 跨通道传输的内存膨胀。
-    - [2026-08-19] 拆分模块：净化逻辑收敛到 src/cleaner.js，PDF 生成拆分到 src/pdf.js，content.js 从 1212 行降至 721 行。
+    - [2026-08-19] 拆分模块：净化逻辑收敛到 src/cleaner.js，PDF 生成拆分到 src/pdf.js，content.js 从 1212 行降至 721 行（累计口径：1212 为审计前行数；单步 pdf.js 拆分为 1074→721）。
     - [2026-08-19] 新增 canvas 32767px 高度上限拦截与图片加载并发控制（上限 8）。
     - [2026-08-19] 审查修复：cleaner 选择器恢复为三路径各自预设（禁止并集，防误删正文）；canvas 高度拦截移到图片加载后复核并新增宽度防护；图片修复（fetch/DataURL 解码）加超时兜底；sendProgress 增加 no-op 兜底；矢量模式标题改用 DOM API 设置防注入；移除 pageUrl 死变量。
 - **待办事项**:
