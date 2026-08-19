@@ -21,8 +21,12 @@ describe('cleaner 统一清理模块', () => {
 
   test('模块应正确暴露 API', () => {
     expect(cleaner).toBeDefined();
-    expect(Array.isArray(cleaner.NOISE_SELECTORS)).toBe(true);
-    expect(cleaner.NOISE_SELECTORS.length).toBeGreaterThan(50);
+    expect(Array.isArray(cleaner.READABILITY_NOISE_SELECTORS)).toBe(true);
+    expect(Array.isArray(cleaner.POST_CLEAN_SELECTORS)).toBe(true);
+    expect(Array.isArray(cleaner.DIRECT_CLEAN_SELECTORS)).toBe(true);
+    expect(cleaner.READABILITY_NOISE_SELECTORS.length).toBeGreaterThan(50);
+    expect(cleaner.POST_CLEAN_SELECTORS.length).toBeGreaterThan(30);
+    expect(cleaner.DIRECT_CLEAN_SELECTORS.length).toBeGreaterThan(20);
     expect(typeof cleaner.removeNoise).toBe('function');
     expect(typeof cleaner.cleanByLinkDensity).toBe('function');
     expect(typeof cleaner.removeEmpty).toBe('function');
@@ -41,7 +45,7 @@ describe('cleaner 统一清理模块', () => {
         '<nav>菜单项</nav>' +
         '<div class="comments">评论1 评论2</div>' +
         '<button>点赞</button>';
-      cleaner.removeNoise(document.body, cleaner.NOISE_SELECTORS);
+      cleaner.removeNoise(document.body, cleaner.READABILITY_NOISE_SELECTORS);
       expect(document.querySelector('nav')).toBeNull();
       expect(document.querySelector('.comments')).toBeNull();
       expect(document.querySelector('button')).toBeNull();
@@ -52,7 +56,7 @@ describe('cleaner 统一清理模块', () => {
       document.body.innerHTML =
         '<div class="related">正文' + longText + '<a href="#">链接</a></div>' +
         '<div class="related">短噪声 <a href="#">链接</a></div>';
-      cleaner.removeNoise(document.body, cleaner.NOISE_SELECTORS);
+      cleaner.removeNoise(document.body, cleaner.READABILITY_NOISE_SELECTORS);
       const kept = document.querySelectorAll('.related');
       expect(kept.length).toBe(1);
       expect(kept[0].textContent.length).toBeGreaterThan(200);
@@ -62,12 +66,24 @@ describe('cleaner 统一清理模块', () => {
       const text = '中等长度文本'.repeat(10); // 60 字符
       document.body.innerHTML = '<div class="ad">' + text + '</div>';
       // 默认 keepTextLen=200，会被移除
-      cleaner.removeNoise(document.body, cleaner.NOISE_SELECTORS);
+      cleaner.removeNoise(document.body, cleaner.READABILITY_NOISE_SELECTORS);
       expect(document.querySelector('.ad')).toBeNull();
 
       document.body.innerHTML = '<div class="ad">' + text + '</div>';
-      cleaner.removeNoise(document.body, cleaner.NOISE_SELECTORS, { keepTextLen: 50 });
+      cleaner.removeNoise(document.body, cleaner.READABILITY_NOISE_SELECTORS, { keepTextLen: 50 });
       expect(document.querySelector('.ad')).not.toBeNull();
+    });
+
+    test('各路径应使用各自的选择器预设（禁止并集）', () => {
+      // [class*="audio"] 仅属于直接提取路径，不应出现在 Readability 预清理路径
+      expect(cleaner.READABILITY_NOISE_SELECTORS).not.toContain('[class*="audio"]');
+      expect(cleaner.DIRECT_CLEAN_SELECTORS).toContain('[class*="audio"]');
+      // Readability 路径的正文元素若含 audio 类名，预清理不应命中
+      const longText = '这是一段足够长的正文内容。'.repeat(30);
+      document.body.innerHTML =
+        '<div class="audio-caption">' + longText + '</div>';
+      cleaner.removeNoise(document.body, cleaner.READABILITY_NOISE_SELECTORS);
+      expect(document.querySelector('.audio-caption')).not.toBeNull();
     });
   });
 

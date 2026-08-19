@@ -3,11 +3,18 @@
  *
  * 负责图片 PDF 的渲染管线：DOM 克隆、html2pdf 渲染、图片修复、下载触发。
  * 由 popup 按需注入（先于 content.js），与 content.js 共享 isolated world：
- *  - 运行时依赖 content.js 的 sendProgress()（导出时才调用，注入顺序无冲突）
+ *  - sendProgress() 由 content.js 提供；缺失时使用模块内 no-op 兜底（见下方）
  *  - html2pdf 库在首次生成时懒加载（loadLibraries）
  *
  * 使用 function 声明（重复注入时安全覆盖，不会抛 SyntaxError）
  */
+
+// sendProgress 定义在 content.js 中，与本模块由 popup 一并注入；
+// 此处提供 no-op 兜底，避免单独注入或顺序变化时抛 ReferenceError 中断导出
+// （进度消息丢失可接受，导出流程不能中断；content.js 随后注入会覆盖此兜底）
+if (typeof window.sendProgress !== 'function') {
+  window.sendProgress = function() {};
+}
 /**
  * 克隆整个文档用于导出
  */
@@ -94,7 +101,6 @@ async function generatePDF(element, options) {
 
   var pageTitle = options.pageTitle;
   var extractedTitle = options.extractedTitle;
-  var pageUrl = options.pageUrl;
   var scale = options.scale;
   var fontSize = options.fontSize;
   var margin = options.margin;
@@ -126,12 +132,15 @@ async function generatePDF(element, options) {
   iframe.contentDocument.write(htmlContent);
   iframe.contentDocument.close();
 
-  var contentHeight = iframe.contentDocument.body.scrollHeight;
-  var finalScale = scale || 2;
-
   // 浏览器对 canvas 单边尺寸有硬性上限（Chrome 为 32767px），
   // 超出会得到空白画布，导出前必须拦截
   var MAX_CANVAS_DIM = 32767;
+
+  // 注意：此刻 iframe 内图片尚未加载，scrollHeight 可能被低估，
+  // 因此图片加载完成后（下方）会再次复核高度
+  var contentHeight = iframe.contentDocument.body.scrollHeight;
+  var finalScale = scale || 2;
+
   if (contentHeight > MAX_CANVAS_DIM) {
     iframe.remove();
     throw new Error(
@@ -150,10 +159,16 @@ async function generatePDF(element, options) {
     console.log('[PDF Exporter] 检测到长网页 (' + contentHeight + 'px)，将 scale 降至 ' + finalScale);
   }
 
-  // 进一步压低 scale，确保 canvas 总高度不超限
-  if (contentHeight * finalScale > MAX_CANVAS_DIM) {
-    finalScale = Math.max(MAX_CANVAS_DIM / contentHeight, 0.1);
-    console.log('[PDF Exporter] 画布高度将超限，scale 进一步降至 ' + finalScale.toFixed(3));
+  // 宽度防护：iframe 固定 1200px 宽且注入样式强制 img max-width:100%，
+  // 正常情况 canvas 宽度 ≤ 1200 × scale，远低于上限；
+  // 此处仅兜底页内存在不可收缩的超宽元素（如固定宽度表格）的罕见场景
+  var contentWidth = iframe.contentDocument.body.scrollWidth || 0;
+  if (contentWidth * finalScale > MAX_CANVAS_DIM) {
+    iframe.remove();
+    throw new Error(
+      '页面内容过宽（' + contentWidth + 'px，缩放后超出图片 PDF ' + MAX_CANVAS_DIM +
+      'px 上限），请改用「矢量 PDF」格式'
+    );
   }
 
   var images = Array.from(iframe.contentDocument.querySelectorAll("img"));
@@ -163,6 +178,33 @@ async function generatePDF(element, options) {
   await mapWithConcurrency(images, 8, function(img) {
     return waitForImageLoad(img);
   });
+
+  // 图片加载完成后复核高度：未加载图片不参与布局高度计算，
+  // 图片极多的页面实际高度可能远超首次读取值，两道拦截都用加载前高度会漏判
+  var loadedHeight = iframe.contentDocument.body.scrollHeight;
+  if (loadedHeight > contentHeight) {
+    contentHeight = loadedHeight;
+    if (contentHeight > MAX_CANVAS_DIM) {
+      iframe.remove();
+      throw new Error(
+        '页面内容过长（' + contentHeight + 'px，超出图片 PDF ' + MAX_CANVAS_DIM +
+        'px 上限），请改用「矢量 PDF」格式或开启「提取正文」模式'
+      );
+    }
+    // 按复核后的高度重新收紧 scale
+    if (contentHeight > 10000) {
+      finalScale = Math.min(finalScale, 1.0);
+    } else if (contentHeight > 5000) {
+      finalScale = Math.min(finalScale, 1.5);
+    }
+  }
+
+  // 防御性兜底：当前 popup 固定 scale=2，上方分支已保证画布高度不超限；
+  // 该检查仅在未来配置调高 scale（约 >6.55）时才会生效，请勿删除
+  if (contentHeight * finalScale > MAX_CANVAS_DIM) {
+    finalScale = Math.max(MAX_CANVAS_DIM / contentHeight, 0.1);
+    console.log('[PDF Exporter] 画布高度将超限，scale 进一步降至 ' + finalScale.toFixed(3));
+  }
 
   var marginConfig = [15, 15, 15, 15];
   if (margin === 'narrow' || margin === 5) {
@@ -285,18 +327,38 @@ function waitForImageLoad(img) {
 
 /**
  * 图片加载失败时，尝试直接 fetch 并转为 DataURL（绕开 CORS 限制）
+ * 每个等待步骤均有超时兜底，防止异常资源导致并发池永久挂起
  */
 async function repairBrokenImage(img) {
   if (!img.src || img.src.startsWith("data:") || img.src.startsWith("blob:")) return;
   try {
-    var response = await fetch(img.src).catch(function() { return null; });
+    // fetch 超时兜底（8s）：网络挂起时中止请求，避免无限等待
+    var controller = (typeof AbortController === 'function') ? new AbortController() : null;
+    var abortTimer = controller ? setTimeout(function() { controller.abort(); }, 8000) : null;
+    var response = await fetch(img.src, controller ? { signal: controller.signal } : {})
+      .catch(function() { return null; });
+    if (abortTimer) clearTimeout(abortTimer);
+
     if (response && response.ok) {
       var blob = await response.blob();
       var dataUrl = await blobToDataURL(blob);
-      // 等待 DataURL 图片解码完成，避免截图时仍在加载
+      // 等待 DataURL 图片解码完成，避免截图时仍在加载；
+      // 异常 dataURL 可能不触发 onload/onerror，必须加超时（5s）兜底
       await new Promise(function(res) {
-        img.onload = res;
-        img.onerror = res;
+        var finished = false;
+        function finish() {
+          if (finished) return;
+          finished = true;
+          img.onload = null;
+          img.onerror = null;
+          res();
+        }
+        var decodeTimer = setTimeout(function() {
+          console.warn("[PDF Exporter] DataURL 解码超时:", (img.src || '').slice(0, 80));
+          finish();
+        }, 5000);
+        img.onload = function() { clearTimeout(decodeTimer); finish(); };
+        img.onerror = function() { clearTimeout(decodeTimer); finish(); };
         img.src = dataUrl;
       });
     }

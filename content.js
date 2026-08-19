@@ -16,7 +16,7 @@ function isExtensionContextValid() {
 }
 
 // 内容脚本版本号 —— 每次修改 content.js 后必须更新！
-var CONTENT_SCRIPT_VERSION = '2026-08-19-v7';
+var CONTENT_SCRIPT_VERSION = '2026-08-19-v8';
 
 // 清理旧版本：移除旧的事件监听器和全局状态
 if (typeof window.__pdfExporterCleanup === 'function') {
@@ -114,7 +114,6 @@ async function handleExportPDF(request, sendResponse) {
       scale: config.scale,
       pageTitle: pageTitle,
       extractedTitle: extractedTitle,
-      pageUrl: pageUrl,
     });
 
     console.log("[PDF Exporter] PDF 生成完成:", pdfResult.filename);
@@ -285,8 +284,9 @@ async function extractReadableContent() {
 
       // 3. 全局噪声清理（Readability 路径，统一逻辑见 src/cleaner.js）
       // 此处作用于整页克隆，保留阈值更宽松：文本>300 且链接密度<0.25 才保留
+      // 注意：必须使用本路径专用预设，禁止换用其他路径的选择器集合
       var cleaner = window.__pdfCleaner;
-      cleaner.removeNoise(markedClone, cleaner.NOISE_SELECTORS, { keepTextLen: 300, keepMaxDensity: 0.25 });
+      cleaner.removeNoise(markedClone, cleaner.READABILITY_NOISE_SELECTORS, { keepTextLen: 300, keepMaxDensity: 0.25 });
 
       // 链接密度清理
       cleaner.cleanByLinkDensity(markedClone, {
@@ -365,7 +365,7 @@ async function extractReadableContent() {
 
     // 4. 对提取后的内容进行二次深度净化（统一逻辑见 src/cleaner.js）
     var cleaner = window.__pdfCleaner;
-    cleaner.removeNoise(contentDiv, cleaner.NOISE_SELECTORS);
+    cleaner.removeNoise(contentDiv, cleaner.POST_CLEAN_SELECTORS);
 
     // 4b. 链接密度清理
     cleaner.cleanByLinkDensity(contentDiv, {
@@ -477,9 +477,9 @@ function cleanExtractedContent(html) {
   var doc = parser.parseFromString(html, 'text/html');
   var body = doc.body;
 
-  // 统一清理逻辑见 src/cleaner.js
+  // 统一清理逻辑见 src/cleaner.js（直接提取路径专用预设）
   var cleaner = window.__pdfCleaner;
-  cleaner.removeNoise(body, cleaner.NOISE_SELECTORS);
+  cleaner.removeNoise(body, cleaner.DIRECT_CLEAN_SELECTORS);
   cleaner.removeNoiseText(body, cleaner.NOISE_TEXT_PATTERNS);
   cleaner.removeEmpty(body, 'p, div, span');
 

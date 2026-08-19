@@ -10,70 +10,107 @@
  * 注意：
  *  - 使用 IIFE + 幂等守卫，重复注入安全
  *  - 挂载到 window.__pdfCleaner，供 content.js 与单元测试使用
+ *  - 选择器按三条清理路径各自一套预设，禁止合并为并集统一套用
+ *    （并集会让各路径命中本不属于它的通配选择器，误删正文风险显著上升）
  */
 (function () {
   if (window.__pdfCleaner) return; // 已加载，跳过
 
   /**
-   * 统一噪声选择器列表
-   * 合并自原 noiseSelectors（Readability 路径）、postCleanSelectors（提取后二次净化）、
-   * innerNoiseSelectors（直接提取内容清理）
+   * 噪声选择器预设（三条路径独立使用，勿合并）
+   *
+   * 历史教训：曾将三套列表合并为单一 NOISE_SELECTORS 统一套用，
+   * 导致 Readability 预清理与正文净化路径新增命中 [class*="nav"]、
+   * [id*="banner"]、[class*="audio"] 等通配符，存在误删正文风险，
+   * 故按路径恢复为独立预设。
    */
-  var NOISE_SELECTORS = [
-    // 语义化标签与 ARIA 角色
+
+  // 路径 1：Readability 预清理（作用于整页克隆，配套最宽松保留阈值）
+  var READABILITY_NOISE_SELECTORS = [
     'nav', 'footer', 'aside', 'header',
     '[role="navigation"]', '[role="complementary"]', '[role="banner"]',
     '[role="contentinfo"]', '[role="search"]', '[role="alert"]',
-    // 已知站点常见类名
     '.nav', '.navigation', '.navbar', '.breadcrumb', '.breadcrumbs',
     '.aside', '.sidebar', '.side-bar', '.side_panel',
     '.footer', '.header', '.topbar', '.top-bar',
     '.ad', '.ads', '.advertisement', '.ad-container', '.ad-wrapper',
+    '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
     '.social-share', '.share-bar', '.share-btn', '.toolbar', '.float-toolbar',
     '.back-top', '.back-to-top', '.go-top',
     '.related-news', '.recommend-articles', '.hot-topics',
     '.recommend', '.related', '.trending',
+    '[class*="recommend"]', '[class*="related"]',
     '.comments-container', '.comments', '#comments', '.comment-list',
+    '[class*="comment"]',
     '.mask', '.overlay', '.modal', '.dialog', '.popup', '.layer',
     '.float-layer', '.float-bar', '.fixed-bar', '.sticky-bar',
+    '[class*="popup"]', '[class*="modal"]', '[class*="dialog"]',
+    '[class*="float-"]', '[class*="sticky-"]',
     '.user-action', '.login-prompt', '.login-panel',
     '.user-panel', '.auth-panel',
     '.copyright', '.site-info', '.footer-info',
-    '.article-widget-head', '.widget-operation-skeleton',
-    '.com-author-name', '.author-name', '.author-info',
-    '.audio-player-skeleton', '.audio-wrap', '.head-detail',
-    // class 通配
-    '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
-    '[class*="recommend"]', '[class*="related"]', '[class*="comment"]',
+    'script', 'style', 'noscript', 'iframe',
     '[class*="share"]', '[class*="social"]',
-    '[class*="popup"]', '[class*="modal"]', '[class*="dialog"]', '[class*="overlay"]',
-    '[class*="float-"]', '[class*="sticky-"]', '[class*="fixed-"]',
-    '[class*="nav"]', '[class*="breadcrumb"]',
-    '[class*="sidebar"]', '[class*="Sidebar"]', '[class*="side-bar"]', '[class*="SideBar"]',
-    '[class*="side_panel"]', '[class*="aside"]', '[class*="Aside"]',
-    '[class*="toolbar"]', '[class*="tool-bar"]',
-    '[class*="action-bar"]', '[class*="actionbar"]', '[class*="ActionBar"]',
-    '[class*="operation-bar"]', '[class*="OperationBar"]',
-    '[class*="copyright"]', '[class*="footer"]',
-    '[class*="login"]', '[class*="signup"]', '[class*="register"]', '[class*="auth-"]',
     '[class*="widget"]', '[class*="banner"]',
     '[class*="skeleton"]', '[class*="placeholder"]', '[class*="loading"]',
-    '[class*="audio"]',
-    // 特定站点定制类名（InfoQ/腾讯新闻等）
+    '.article-widget-head', '.widget-operation-skeleton',
+    '.com-author-name', '.audio-player-skeleton',
     '[class*="_content-side"]', '[class*="_operation-bar"]',
     '[class*="_topic-nav"]', '[class*="_sub-nav"]',
     '[class*="_layout-footer"]', '[class*="_nav-list"]',
     '[class*="_article-cover"]', '[class*="_audio-wrap"]',
-    // id 通配
-    '[id*="ad-"]', '[id*="ads-"]',
-    '[id*="recommend"]', '[id*="related"]', '[id*="comment"]',
-    '[id*="share"]', '[id*="social"]',
-    '[id*="nav"]', '[id*="breadcrumb"]', '[id*="sidebar"]',
-    '[id*="footer"]', '[id*="widget"]', '[id*="banner"]',
-    // 交互/脚本类标签
-    'script', 'style', 'noscript', 'iframe',
-    'button', 'input', 'textarea', 'select',
+    '[class*="sidebar"]', '[class*="Sidebar"]',
+    '[class*="side-bar"]', '[class*="SideBar"]',
+    '[class*="aside"]', '[class*="Aside"]',
+    '[class*="operation-bar"]', '[class*="OperationBar"]',
+    '[class*="action-bar"]', '[class*="ActionBar"]',
+    'button', 'input', 'textarea', 'select'
+  ];
+
+  // 路径 2：正文提取后二次净化（作用于 Readability 提取产物，默认保留阈值）
+  var POST_CLEAN_SELECTORS = [
+    '[class*="share"]', '[id*="share"]',
+    '[class*="social"]', '[id*="social"]',
+    '[class*="recommend"]', '[id*="recommend"]',
+    '[class*="related"]', '[id*="related"]',
+    '[class*="ad-"]', '[class*="ads-"]',
+    '[class*="advert"]', '[id*="ad-"]', '[id*="ads-"]',
+    '[class*="nav"]', '[id*="nav"]',
+    '[class*="breadcrumb"]', '[id*="breadcrumb"]',
+    '[class*="sidebar"]', '[id*="sidebar"]',
+    '[class*="side-bar"]', '[class*="side_panel"]',
+    '[class*="comment"]', '[id*="comment"]',
+    '[class*="popup"]', '[class*="modal"]',
+    '[class*="dialog"]', '[class*="overlay"]',
+    '[class*="float-"]', '[class*="sticky-"]', '[class*="fixed-"]',
+    '[class*="toolbar"]', '[class*="tool-bar"]',
+    '[class*="action-bar"]', '[class*="actionbar"]',
+    '[class*="copyright"]', '[class*="footer"]',
+    '[id*="footer"]',
+    '[class*="login"]', '[class*="signup"]',
+    '[class*="register"]', '[class*="auth-"]',
+    '[class*="widget"]', '[id*="widget"]',
+    '[class*="banner"]', '[id*="banner"]',
+    'button', 'script', 'style', 'noscript', 'iframe',
     'svg.icon', 'svg[class*="icon"]'
+  ];
+
+  // 路径 3：已知容器直接提取的内容清理（作用于容器原始 HTML，配套噪声文本模式）
+  var DIRECT_CLEAN_SELECTORS = [
+    '.com-author-name', '.author-name', '.author-info',
+    '.head-detail', '.article-widget-head',
+    '.audio-player-skeleton', '.audio-wrap', '[class*="audio"]',
+    '[class*="operation-bar"]', '[class*="OperationBar"]',
+    '[class*="action-bar"]', '[class*="ActionBar"]',
+    '[class*="share"]', '[id*="share"]',
+    '[class*="recommend"]', '[id*="recommend"]',
+    '[class*="related"]', '[id*="related"]',
+    '[class*="comment"]', '[id*="comment"]',
+    '[class*="ad-"]', '[class*="ads-"]', '[class*="advert"]',
+    '[class*="popup"]', '[class*="modal"]', '[class*="dialog"]',
+    '[class*="overlay"]', '[class*="float-"]', '[class*="sticky-"]',
+    '[class*="skeleton"]', '[class*="placeholder"]',
+    'button', 'input[type="button"]', 'input[type="submit"]'
   ];
 
   /**
@@ -212,7 +249,9 @@
   }
 
   window.__pdfCleaner = {
-    NOISE_SELECTORS: NOISE_SELECTORS,
+    READABILITY_NOISE_SELECTORS: READABILITY_NOISE_SELECTORS,
+    POST_CLEAN_SELECTORS: POST_CLEAN_SELECTORS,
+    DIRECT_CLEAN_SELECTORS: DIRECT_CLEAN_SELECTORS,
     NOISE_TEXT_PATTERNS: NOISE_TEXT_PATTERNS,
     linkDensity: linkDensity,
     removeNoise: removeNoise,

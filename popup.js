@@ -249,8 +249,12 @@ async function exportToPDFVector(tabId, config) {
 
           var iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
           iframeDoc.open();
-          iframeDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + (pageTitle || '') + '</title></head><body></body></html>');
+          iframeDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title></title></head><body></body></html>');
           iframeDoc.close();
+
+          // 通过 DOM API 设置标题：tab.title 是页面可控内容，
+          // 直接拼入 document.write 可被注入 HTML/脚本
+          iframeDoc.title = pageTitle || '';
 
           // 写入正文内容
           iframeDoc.body.innerHTML = htmlContent;
