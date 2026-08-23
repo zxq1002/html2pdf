@@ -39,6 +39,49 @@ describe('cleaner 统一清理模块', () => {
     expect(window.__pdfCleaner).toBe(cleaner);
   });
 
+  describe('resolveLazyImages', () => {
+    test('应把 data-src 回填到缺失的 src', () => {
+      document.body.innerHTML = '<img data-src="https://example.com/a.png">';
+      cleaner.resolveLazyImages(document.body);
+      expect(document.querySelector('img').getAttribute('src')).toBe('https://example.com/a.png');
+    });
+
+    test('应把 data-src 回填到占位 data: URL', () => {
+      document.body.innerHTML =
+        '<img src="data:image/svg+xml,placeholder" data-src="https://example.com/b.png">';
+      cleaner.resolveLazyImages(document.body);
+      expect(document.querySelector('img').getAttribute('src')).toBe('https://example.com/b.png');
+    });
+
+    test('不应覆盖已加载的真实 http src', () => {
+      document.body.innerHTML =
+        '<img src="https://example.com/real.png" data-src="https://example.com/lazy.png">';
+      cleaner.resolveLazyImages(document.body);
+      expect(document.querySelector('img').getAttribute('src')).toBe('https://example.com/real.png');
+    });
+
+    test('支持 data-original / data-lazy-src 别名', () => {
+      document.body.innerHTML =
+        '<img id="a" data-original="https://example.com/o.png">' +
+        '<img id="b" src="" data-lazy-src="https://example.com/l.png">';
+      cleaner.resolveLazyImages(document.body);
+      expect(document.getElementById('a').getAttribute('src')).toBe('https://example.com/o.png');
+      expect(document.getElementById('b').getAttribute('src')).toBe('https://example.com/l.png');
+    });
+
+    test('setCors=true 时对 http(s) 图片设置 crossOrigin', () => {
+      document.body.innerHTML = '<img data-src="https://example.com/c.png">';
+      cleaner.resolveLazyImages(document.body, true);
+      expect(document.querySelector('img').getAttribute('crossorigin')).toBe('anonymous');
+    });
+
+    test('忽略无懒加载属性的图片', () => {
+      document.body.innerHTML = '<img src="https://example.com/plain.png">';
+      cleaner.resolveLazyImages(document.body);
+      expect(document.querySelector('img').getAttribute('src')).toBe('https://example.com/plain.png');
+    });
+  });
+
   describe('removeNoise', () => {
     test('应移除噪声元素', () => {
       document.body.innerHTML =
@@ -72,6 +115,17 @@ describe('cleaner 统一清理模块', () => {
       document.body.innerHTML = '<div class="ad">' + text + '</div>';
       cleaner.removeNoise(document.body, cleaner.READABILITY_NOISE_SELECTORS, { keepTextLen: 50 });
       expect(document.querySelector('.ad')).not.toBeNull();
+    });
+
+    test('不应移除正文图片（微信懒加载 class 含 placeholder）', () => {
+      document.body.innerHTML =
+        '<img class="rich_pages wxw-img js_insertlocalimg js_img_placeholder wx_img_placeholder" data-src="https://mmbiz.qpic.cn/a.png">' +
+        '<div class="loading-placeholder">占位容器</div>';
+      cleaner.removeNoise(document.body, cleaner.DIRECT_CLEAN_SELECTORS);
+      // 正文图片必须保留
+      expect(document.querySelector('img')).not.toBeNull();
+      // 占位容器仍应被移除
+      expect(document.querySelector('.loading-placeholder')).toBeNull();
     });
 
     test('各路径应使用各自的选择器预设（禁止并集）', () => {

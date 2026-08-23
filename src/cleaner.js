@@ -14,7 +14,9 @@
  *    （并集会让各路径命中本不属于它的通配选择器，误删正文风险显著上升）
  */
 (function () {
-  if (window.__pdfCleaner) return; // 已加载，跳过
+  // 版本号：每次修改 cleaner.js 后必须更新，确保已注入旧版本的页面在重新注入时能覆盖
+  var CLEANER_VERSION = '2026-08-19-v3';
+  if (window.__pdfCleaner && window.__pdfCleaner.VERSION === CLEANER_VERSION) return; // 已加载同版本，跳过
 
   /**
    * 噪声选择器预设（三条路径独立使用，勿合并）
@@ -168,6 +170,9 @@
     selectors.forEach(function (selector) {
       try {
         root.querySelectorAll(selector).forEach(function (el) {
+          // 图片是正文内容：微信等懒加载会给正文 <img> 加 js_img_placeholder /
+          // wx_img_placeholder 之类 class，若按 [class*="placeholder"] 处理会把正文图片误删
+          if (el.tagName && el.tagName.toLowerCase() === 'img') return;
           var text = el.textContent.trim();
           if (text.length > keepTextLen && linkDensity(el, text) < keepMaxDensity) {
             return; // 长文本且链接少，视为正文保留
@@ -248,7 +253,35 @@
     });
   }
 
+  /**
+   * 解析懒加载图片：将 data-src / data-original / data-lazy-src 指向的真实地址
+   * 回填到 src。仅当 src 缺失、为空或为占位 data: URL 时才替换，避免覆盖已加载图片。
+   *
+   * 背景：微信文章等页面会由运行时 JS 将 src 置为 1px 透明 SVG 占位，
+   * 真实地址只保留在 data-src；若不解析，导出 PDF 时图片会缺失。
+   *
+   * @param {Element|Document} root - 扫描根节点
+   * @param {boolean} [setCors=false] - 是否对解析出的 http(s) 图片设置
+   *   crossOrigin=anonymous（html2canvas 需要无污染 canvas 才能绘制跨域图）
+   */
+  function resolveLazyImages(root, setCors) {
+    root.querySelectorAll('img').forEach(function (img) {
+      var lazySrc = img.getAttribute('data-src') ||
+        img.getAttribute('data-original') ||
+        img.getAttribute('data-lazy-src');
+      if (!lazySrc) return;
+      var rawSrc = img.getAttribute('src') || '';
+      // 已有真实（http/data 之外的）地址时保持原样，避免破坏已加载图片
+      if (rawSrc !== '' && rawSrc.indexOf('data:') !== 0) return;
+      img.setAttribute('src', lazySrc);
+      if (setCors && /^https?:/i.test(lazySrc)) {
+        img.crossOrigin = 'anonymous';
+      }
+    });
+  }
+
   window.__pdfCleaner = {
+    VERSION: CLEANER_VERSION,
     READABILITY_NOISE_SELECTORS: READABILITY_NOISE_SELECTORS,
     POST_CLEAN_SELECTORS: POST_CLEAN_SELECTORS,
     DIRECT_CLEAN_SELECTORS: DIRECT_CLEAN_SELECTORS,
@@ -257,6 +290,7 @@
     removeNoise: removeNoise,
     cleanByLinkDensity: cleanByLinkDensity,
     removeEmpty: removeEmpty,
-    removeNoiseText: removeNoiseText
+    removeNoiseText: removeNoiseText,
+    resolveLazyImages: resolveLazyImages
   };
 })();

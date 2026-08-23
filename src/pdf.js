@@ -4,7 +4,7 @@
  * 负责图片 PDF 的渲染管线：DOM 克隆、html2pdf 渲染、图片修复、下载触发。
  * 由 popup 按需注入（先于 content.js），与 content.js 共享 isolated world：
  *  - sendProgress() 由 content.js 提供；缺失时使用模块内 no-op 兜底（见下方）
- *  - html2pdf 库在首次生成时懒加载（loadLibraries）
+ *  - html2pdf 由 popup 在图片导出前通过 executeScript 注入到同一 isolated world
  *
  * 使用 function 声明（重复注入时安全覆盖，不会抛 SyntaxError）
  */
@@ -61,9 +61,10 @@ function cloneDocumentForExport(config) {
 
           var inlineStyle = node.getAttribute('style') || '';
           if (inlineStyle.indexOf('var(') !== -1 || inlineStyle.indexOf('calc(') !== -1) {
-            clone.style.width = style.width;
+            // 只保留高度；不复制原页面基于视口计算出的 width/margin，
+            // 否则克隆内容在 iframe 里会被固定成原视口宽度并产生左/右偏移
+            // （微信正文 max-width ~750px，固定宽 800px 的 iframe 里满宽即可）
             clone.style.height = style.height;
-            clone.style.margin = style.margin;
             clone.style.padding = style.padding;
           }
         } catch (e) {}
@@ -116,8 +117,27 @@ async function generatePDF(element, options) {
 
   var filename = safeTitle + ".pdf";
 
+  // 页边距配置需在创建 iframe 前确定：iframe 宽度必须与 html2pdf 渲染容器
+  // （宽 = pageSize.inner.width，即 A4 宽减左右页边距）严格一致。
+  // 若两者不一致，内容会在渲染时以不同宽度重新排版，实测高度失准，
+  // 导致 PDF 末尾内容被截断（历史 bug：800/1200px iframe vs 180mm≈680px 容器）。
+  var marginConfig = [15, 15, 15, 15];
+  if (margin === 'narrow' || margin === 5) {
+    marginConfig = [5, 5, 5, 5];
+  } else if (margin === 'wide' || margin === 25 || margin === 30) {
+    marginConfig = [30, 30, 30, 30];
+  } else if (typeof margin === 'number') {
+    marginConfig = [margin, margin, margin, margin];
+  } else if (Array.isArray(margin)) {
+    marginConfig = margin;
+  }
+
+  // CSS 规定 1in = 96px、1in = 25.4mm，据此把 mm 换算为 px
+  var PX_PER_MM = 96 / 25.4;
+  var contentMm = 210 - marginConfig[1] - marginConfig[3]; // A4 宽 - 左右页边距
+  var iframeWidth = Math.round(contentMm * PX_PER_MM);
   var iframe = document.createElement("iframe");
-  iframe.style.cssText = "position: fixed; top: 0; left: 0; width: 1200px; height: 100vh; border: none; z-index: 999999; background: white; visibility: hidden;";
+  iframe.style.cssText = "position: fixed; top: 0; left: 0; width: " + iframeWidth + "px; height: 100vh; border: none; z-index: 999999; background: white; visibility: hidden;";
   document.body.appendChild(iframe);
 
   await new Promise(function(resolve) { setTimeout(resolve, 50); });
@@ -126,11 +146,26 @@ async function generatePDF(element, options) {
   var fontSizeVal = typeof fontSize === 'number' ? fontSize + 'px' : (fontSize || '16px');
   var lightModeCSS = forceLightMode ? ':root { color-scheme: light !important; } body { background: white !important; color: #000 !important; } [data-theme="dark"], .dark, .dark-mode { background-color: #fff !important; color: #000 !important; }' : '';
 
-  var htmlContent = '<!DOCTYPE html><html ' + forceLightAttr + '><head><meta charset="UTF-8"><style>* { box-sizing: border-box; margin: 0; padding: 0; }body { font-family: "Charter", "Georgia", "Source Serif Pro", serif; font-size: ' + fontSizeVal + '; line-height: 1.6; color: #333; background: white; padding: 0; -webkit-print-color-adjust: exact !important; }' + lightModeCSS + 'img { max-width: 100%; height: auto; display: block; margin: 10px auto; }.pdf-readable-content { padding: 0; }h1 { margin-top: 0; }</style></head><body>' + element.innerHTML + '</body></html>';
+  var htmlContent = '<!DOCTYPE html><html ' + forceLightAttr + '><head><meta charset="UTF-8"><meta name="referrer" content="no-referrer"><style>* { box-sizing: border-box; margin: 0; padding: 0; }body { font-family: "Charter", "Georgia", "Source Serif Pro", serif; font-size: ' + fontSizeVal + '; line-height: 1.6; color: #333; background: white; padding: 0; -webkit-print-color-adjust: exact !important; }' + lightModeCSS + 'img { max-width: 100%; height: auto; display: block; margin: 10px auto; }.pdf-readable-content { padding: 0; }h1 { margin-top: 0; }#KISS-Translator-Message, [id^="KISS-Translator-"] { display: none !important; }</style></head><body>' + element.innerHTML + '</body></html>';
 
   iframe.contentDocument.open();
   iframe.contentDocument.write(htmlContent);
   iframe.contentDocument.close();
+
+  // 解析懒加载图片（微信等 data-src 占位）并设置 CORS，使 html2canvas 能无污染绘制；
+  // 原始模式克隆自活页面，图片可能仍为 1px 占位 src
+  try {
+    if (window.__pdfCleaner && typeof window.__pdfCleaner.resolveLazyImages === 'function') {
+      window.__pdfCleaner.resolveLazyImages(iframe.contentDocument, true);
+    }
+  } catch (e) {}
+
+  // 记录 body 直接子元素快照：渲染前据此移除等待期间被翻译插件（如
+  // KISS-Translator）注入的错误浮层
+  var genBodySnapshot = [];
+  try {
+    genBodySnapshot = Array.prototype.slice.call(iframe.contentDocument.body.children || []);
+  } catch (e) {}
 
   // 浏览器对 canvas 单边尺寸有硬性上限（Chrome 为 32767px），
   // 超出会得到空白画布，导出前必须拦截
@@ -159,9 +194,9 @@ async function generatePDF(element, options) {
     console.log('[PDF Exporter] 检测到长网页 (' + contentHeight + 'px)，将 scale 降至 ' + finalScale);
   }
 
-  // 宽度防护：iframe 固定 1200px 宽且注入样式强制 img max-width:100%，
-  // 正常情况 canvas 宽度 ≤ 1200 × scale，远低于上限；
-  // 此处仅兜底页内存在不可收缩的超宽元素（如固定宽度表格）的罕见场景
+  // 宽度防护：iframe 宽度 = A4 内容宽（约 680px，随页边距微调）且注入样式
+  // 强制 img max-width:100%，正常情况 canvas 宽度 ≈ iframeWidth × scale，
+  // 远低于上限；此处仅兜底页内存在不可收缩的超宽元素（如固定宽度表格）的罕见场景
   var contentWidth = iframe.contentDocument.body.scrollWidth || 0;
   if (contentWidth * finalScale > MAX_CANVAS_DIM) {
     iframe.remove();
@@ -206,17 +241,6 @@ async function generatePDF(element, options) {
     console.log('[PDF Exporter] 画布高度将超限，scale 进一步降至 ' + finalScale.toFixed(3));
   }
 
-  var marginConfig = [15, 15, 15, 15];
-  if (margin === 'narrow' || margin === 5) {
-    marginConfig = [5, 5, 5, 5];
-  } else if (margin === 'wide' || margin === 25 || margin === 30) {
-    marginConfig = [30, 30, 30, 30];
-  } else if (typeof margin === 'number') {
-    marginConfig = [margin, margin, margin, margin];
-  } else if (Array.isArray(margin)) {
-    marginConfig = margin;
-  }
-
   var opt = {
     margin: marginConfig,
     filename: filename,
@@ -227,6 +251,12 @@ async function generatePDF(element, options) {
       allowTaint: false,
       letterRendering: true,
       backgroundColor: "#ffffff",
+      // 必须归零：html2canvas 默认把主页面滚动位置带入克隆文档
+      // （toIFrame 中 scrollTo(scrollX, scrollY)），而渲染容器挂在
+      // position:fixed 浮层里、截图原点恒为 (0,0)，页面滚动时容器会被
+      // 推到 y=scrollY 处，导致 PDF 前面出现整页空白、末尾内容被裁掉
+      scrollX: 0,
+      scrollY: 0,
     },
     jsPDF: {
       unit: "mm",
@@ -239,6 +269,19 @@ async function generatePDF(element, options) {
   try {
     console.log("[PDF Exporter] 生成 PDF...");
     sendProgress(70, "正在生成 PDF 页面...");
+
+    // 渲染前移除等待期间被翻译插件注入的浮层（如 KISS-Translator 错误提示）
+    try {
+      Array.prototype.slice.call(iframe.contentDocument.body.children).forEach(function(el) {
+        if (genBodySnapshot.indexOf(el) === -1) el.remove();
+      });
+    } catch (e) {}
+
+    // 注意：不要设置 html2canvas.width/height 强制覆盖渲染尺寸。
+    // html2pdf 会把内容克隆进宽为 pageSize.inner.width 的容器重新排版，
+    // html2canvas 需按该容器的实际边界自适应高度；显式覆盖会裁掉末尾内容
+    // （历史 bug：以 iframe 测量值硬设 height，重排后实际更高导致截断）。
+    // iframe 宽度已与容器一致（见上方 iframeWidth），测量与真实布局对齐。
 
     var pdfBlob = await html2pdf()
       .set(opt)
@@ -398,30 +441,14 @@ function triggerDownload(blob, filename) {
 }
 
 /**
- * 动态加载必要的库
+ * 检查 html2pdf 是否可用。
+ * html2pdf 由 popup 在图片导出前通过 chrome.scripting.executeScript 注入到
+ * 同一个 isolated world（不能用 <script> 标签懒加载——那样它跑在主世界，
+ * 本模块看不到 window.html2pdf，且部分页面 CSP 会拦截）。
  */
 async function loadLibraries() {
   if (window.html2pdf) return;
-
-  var scriptUrl = chrome.runtime.getURL("lib/html2pdf.bundle.min.js");
-  await loadScript(scriptUrl);
-
-  if (!window.html2pdf) {
-    throw new Error("无法加载 html2pdf 库");
-  }
-}
-
-/**
- * 动态加载脚本
- */
-function loadScript(src) {
-  return new Promise(function(resolve, reject) {
-    var script = document.createElement("script");
-    script.src = src;
-    script.onload = resolve;
-    script.onerror = function() { reject(new Error("无法加载: " + src)); };
-    document.head.appendChild(script);
-  });
+  throw new Error("无法加载 html2pdf 库");
 }
 
 // 暴露内部函数到 window（供单元测试访问，isolated world 中无安全风险）

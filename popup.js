@@ -244,12 +244,14 @@ async function exportToPDFVector(tabId, config) {
           // 创建隐藏 iframe 承载打印内容
           var iframe = document.createElement('iframe');
           iframe.id = '__pdf_exporter_print_frame';
+          iframe.setAttribute('translate', 'no');
           iframe.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:2147483646;background:white;';
           document.body.appendChild(iframe);
 
           var iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
           iframeDoc.open();
-          iframeDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title></title></head><body></body></html>');
+          // no-referrer：避免微信 mmbiz 图片因 Referer 被反盗链替换成占位图
+          iframeDoc.write('<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title></title></head><body></body></html>');
           iframeDoc.close();
 
           // 通过 DOM API 设置标题：tab.title 是页面可控内容，
@@ -270,21 +272,44 @@ async function exportToPDFVector(tabId, config) {
               img { max-width: 100% !important; height: auto !important; page-break-inside: avoid !important; ${includeImages ? '' : 'display: none !important;'} }
               .article-body p { margin-bottom: 1.2em; text-align: justify; }
               a { color: inherit !important; }
+              /* 隐藏翻译插件（如 KISS-Translator）注入的错误横幅，避免打印进 PDF */
+              #KISS-Translator-Message, [id^="KISS-Translator-"] { display: none !important; }
             }
           `;
           iframeDoc.head.appendChild(printStyles);
 
-          // 等待 iframe 渲染完成后触发打印
-          setTimeout(function() {
+          // KISS-Translator 等翻译插件的错误横幅已由上面的 print CSS
+          // （#KISS-Translator-Message { display:none }）隐藏，无需再删 DOM。
+          // 注意：之前用「只保留 .pdf-readable-content 容器」的清理有风险——
+          // 若容器查询不到会误删全部正文，故此处不再删 body 子元素。
+          function doPrint() {
             iframe.contentWindow.focus();
             iframe.contentWindow.print();
-
             // 打印完成后清理 iframe
             setTimeout(function() {
               iframe.remove();
               resolve();
             }, 500);
-          }, 500);
+          }
+          var imgs = Array.prototype.slice.call(iframeDoc.querySelectorAll('img'));
+          if (!imgs.length) { doPrint(); return; }
+          var pending = imgs.length;
+          var settled = false;
+          function settle() {
+            if (settled) return;
+            settled = true;
+            doPrint();
+          }
+          var waitTimer = setTimeout(settle, 5000);
+          imgs.forEach(function(img) {
+            function one() {
+              pending--;
+              if (pending <= 0) { clearTimeout(waitTimer); settle(); }
+            }
+            if (img.complete) { one(); return; }
+            img.addEventListener('load', one);
+            img.addEventListener('error', one);
+          });
         });
       },
       args: [response.htmlContent, config.includeImages, config.forceLightMode, tabInfo.title],
@@ -301,6 +326,7 @@ async function exportToPDFVector(tabId, config) {
         // 创建隐藏 iframe
         var iframe = document.createElement('iframe');
         iframe.id = '__pdf_exporter_print_frame';
+        iframe.setAttribute('translate', 'no');
         iframe.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:2147483646;background:white;';
         document.body.appendChild(iframe);
 
@@ -311,6 +337,28 @@ async function exportToPDFVector(tabId, config) {
         var pageHtml = document.documentElement.outerHTML;
         iframeDoc.write(pageHtml);
         iframeDoc.close();
+
+        // no-referrer：避免微信 mmbiz 图片因 Referer 被反盗链替换成占位图
+        try {
+          var refMeta = iframeDoc.createElement('meta');
+          refMeta.name = 'referrer';
+          refMeta.content = 'no-referrer';
+          iframeDoc.head.appendChild(refMeta);
+        } catch(e) {}
+
+        // 解析懒加载图片（微信等 data-src 占位），避免打印时图片缺失
+        try {
+          iframeDoc.querySelectorAll('img').forEach(function(img) {
+            var lazySrc = img.getAttribute('data-src') ||
+              img.getAttribute('data-original') ||
+              img.getAttribute('data-lazy-src');
+            if (!lazySrc) return;
+            var rawSrc = img.getAttribute('src') || '';
+            if (rawSrc === '' || rawSrc.indexOf('data:') === 0) {
+              img.setAttribute('src', lazySrc);
+            }
+          });
+        } catch(e) {}
 
         // 在 iframe 中移除浮动 UI 元素（使用 getComputedStyle 检测）
         // iframe 是静态副本，扩展脚本不在其中运行，不会被反向覆盖
@@ -353,20 +401,44 @@ async function exportToPDFVector(tabId, config) {
             .social-share, .comments, [role="navigation"],
             [role="banner"], [role="complementary"],
             script, style, noscript, iframe { display: none !important; }
+            /* 隐藏翻译插件（如 KISS-Translator）注入的错误横幅 */
+            #KISS-Translator-Message, [id^="KISS-Translator-"] { display: none !important; }
           }
         `;
         iframeDoc.head.appendChild(printStyles);
 
-        // 等待渲染后打印
-        setTimeout(function() {
+        // 等待图片加载完成后再打印（懒加载图已在上方解析为真实 src）。
+        // 注：原始模式复制的是整页 HTML（含微信运行时脚本），不能像阅读模式
+        // 那样用 MutationObserver 删“新注入”元素——微信脚本会持续改写 DOM，
+        // 误删会把正文清空导致打印空白；KISS-Translator 等错误横幅已由上面
+        // 的 print CSS（#KISS-Translator-Message { display:none }）隐藏。
+        function doPrint() {
           iframe.contentWindow.focus();
           iframe.contentWindow.print();
-
           setTimeout(function() {
             iframe.remove();
             resolve();
           }, 500);
-        }, 800);
+        }
+        var imgs = Array.prototype.slice.call(iframeDoc.querySelectorAll('img'));
+        if (!imgs.length) { doPrint(); return; }
+        var pending = imgs.length;
+        var settled = false;
+        function settle() {
+          if (settled) return;
+          settled = true;
+          doPrint();
+        }
+        var waitTimer = setTimeout(settle, 5000);
+        imgs.forEach(function(img) {
+          function one() {
+            pending--;
+            if (pending <= 0) { clearTimeout(waitTimer); settle(); }
+          }
+          if (img.complete) { one(); return; }
+          img.addEventListener('load', one);
+          img.addEventListener('error', one);
+        });
       });
     },
     args: [config.includeImages, config.forceLightMode],
@@ -417,6 +489,14 @@ async function exportToPDF() {
       // 确保 content script 已注入
       updateProgress(20, "正在注入脚本...");
       await ensureContentScriptInjected(tab.id);
+
+      // 注入 html2pdf 到 isolated world（不能用 <script> 标签懒加载：
+      // 那样它跑在主世界，isolated world 的 content script 看不到 window.html2pdf，
+      // 且部分页面 CSP 会拦截）。这里用 executeScript 注入到同一 isolated world。
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["lib/html2pdf.bundle.min.js"],
+      });
 
       // 向 content script 发送指令执行导出
       // content script 内部直接通过 blob URL 触发下载，

@@ -16,7 +16,7 @@ function isExtensionContextValid() {
 }
 
 // 内容脚本版本号 —— 每次修改 content.js 后必须更新！
-var CONTENT_SCRIPT_VERSION = '2026-08-19-v8';
+var CONTENT_SCRIPT_VERSION = '2026-08-19-v9';
 
 // 清理旧版本：移除旧的事件监听器和全局状态
 if (typeof window.__pdfExporterCleanup === 'function') {
@@ -46,10 +46,11 @@ function safeSendResponse(sendResponse, data) {
 // 不再注册 chrome.runtime.onMessage 监听器（避免 iframe 中旧脚本截获消息）
 
 // 保存清理函数和版本号
+// 注意：只清理 content.js 自身的状态；extractor/cleaner 各自有幂等守卫，
+// 不能在此删除它们的 window.extract / __extractorInjected / __pdfCleaner，
+// 否则同一轮注入中（extractor/cleaner 先于本文件执行、已跳过）会导致其全局被清空。
 window.__pdfExporterCleanup = function() {
   delete window.__pdfExporterInjected;
-  delete window.__extractorInjected;
-  if (typeof window.extract !== 'undefined') delete window.extract;
 };
 window.__pdfExporterInjected = CONTENT_SCRIPT_VERSION;
 console.log('[PDF Exporter] 内容脚本已注入 v' + CONTENT_SCRIPT_VERSION);
@@ -242,17 +243,33 @@ async function extractReadableContent() {
             byline: ''
           };
 
-          // 提取作者
-          var authorSelectors = [
-            '.author-name', '.author', '.byline', '.writer',
-            '[class*="author"]', '[class*="byline"]',
-            '.com-author-name'
-          ];
-          for (var j = 0; j < authorSelectors.length; j++) {
-            var authorEl = document.querySelector(authorSelectors[j]);
-            if (authorEl && authorEl.textContent.trim()) {
-              article.byline = authorEl.textContent.trim();
-              break;
+          // 提取作者：优先读 meta 标签（微信运行时可能把 DOM 作者名替换为「名称已清空」，
+          // 而 meta og:article:author / name=author 仍保留原文）
+          var placeholderAuthors = ['名称已清空', '微信公众平台', '公众号'];
+          function validAuthor(text) {
+            text = (text || '').trim();
+            return text && placeholderAuthors.indexOf(text) === -1 ? text : '';
+          }
+          function metaAuthor(sel) {
+            var m = document.querySelector(sel);
+            return m ? validAuthor(m.getAttribute('content')) : '';
+          }
+          article.byline = metaAuthor('meta[property="og:article:author"]') ||
+                            metaAuthor('meta[name="author"]');
+          if (!article.byline) {
+            var authorSelectors = [
+              '#js_author_name', '#js_author_name_text',
+              '.author-name', '.author', '.byline', '.writer',
+              '[class*="author"]', '[class*="byline"]',
+              '.com-author-name'
+            ];
+            for (var j = 0; j < authorSelectors.length; j++) {
+              var authorEl = document.querySelector(authorSelectors[j]);
+              var authorText = validAuthor(authorEl && authorEl.textContent);
+              if (authorText) {
+                article.byline = authorText;
+                break;
+              }
             }
           }
 
@@ -297,13 +314,8 @@ async function extractReadableContent() {
         manyLinksMaxText: 500,
       });
 
-      // 处理延迟加载图片
-      markedClone.querySelectorAll('img').forEach(function(img) {
-        var lazySrc = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src');
-        if (lazySrc && (!img.src || img.src.startsWith('data:'))) {
-          img.src = lazySrc;
-        }
-      });
+      // 处理延迟加载图片（统一逻辑见 src/cleaner.js resolveLazyImages）
+      cleaner.resolveLazyImages(markedClone);
 
       // Readability 提取
       // 注意：Readability 会就地修改传入的 document，绝不能传活的 document，
@@ -393,10 +405,15 @@ async function extractReadableContent() {
       el.removeAttribute('border');
 
       if (isImage) {
-        el.style.maxWidth = '100%';
-        el.style.height = 'auto';
-        el.style.display = 'block';
-        el.style.margin = '25px auto';
+        // 用 !important 覆盖微信懒加载注入的固定尺寸（setImgSize 会写
+        // width/height: Xpx !important），并强制可见，避免图片在 PDF 中缺失/不可见
+        el.style.setProperty('width', 'auto', 'important');
+        el.style.setProperty('height', 'auto', 'important');
+        el.style.setProperty('max-width', '100%', 'important');
+        el.style.setProperty('display', 'block', 'important');
+        el.style.setProperty('margin', '25px auto', 'important');
+        el.style.setProperty('opacity', '1', 'important');
+        el.style.setProperty('visibility', 'visible', 'important');
         return;
       }
 
@@ -479,6 +496,9 @@ function cleanExtractedContent(html) {
 
   // 统一清理逻辑见 src/cleaner.js（直接提取路径专用预设）
   var cleaner = window.__pdfCleaner;
+  // 先解析懒加载图片（微信等 data-src）：normalizeContent 会移除全部 data-* 属性，
+  // 必须在此之前把真实地址回填到 src，否则导出图片缺失
+  cleaner.resolveLazyImages(body);
   cleaner.removeNoise(body, cleaner.DIRECT_CLEAN_SELECTORS);
   cleaner.removeNoiseText(body, cleaner.NOISE_TEXT_PATTERNS);
   cleaner.removeEmpty(body, 'p, div, span');
